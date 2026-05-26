@@ -4,7 +4,11 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from machine import machine_bp
-from settingmachine import settingmachine_bp, ensure_warning_log_columns
+from settingmachine import (
+    settingmachine_bp,
+    ensure_warning_log_columns,
+    ensure_machine_threshold_table,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,6 +30,10 @@ def create_app():
     app.register_blueprint(machine_bp)
     app.register_blueprint(settingmachine_bp)
 
+    with app.app_context():
+      ensure_warning_log_columns()
+      ensure_machine_threshold_table()
+
     @app.route("/")
     def home():
         return jsonify({
@@ -41,8 +49,6 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    ensure_warning_log_columns()
-
     app.run(
         host="0.0.0.0",
         port=5000,

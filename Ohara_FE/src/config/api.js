@@ -18,14 +18,14 @@ export const temperatureHumidityApi = {
   },
 
   // Lấy setting ngưỡng cảnh báo
-  getThresholdSetting: () => {
-    return api.get("/api/settings/threshold");
-  },
+  getThresholdSetting: (machineId) =>
+  api.get("/api/settings/threshold", {
+    params: { machineId },
+  }),
 
   // Lưu setting ngưỡng cảnh báo
-  updateThresholdSetting: (setting) => {
-    return api.put("/api/settings/threshold", setting);
-  },
+  updateThresholdSetting: (data) =>
+  api.put("/api/settings/threshold", data),
 
   // Lấy danh sách mốc chart 10s / 30s / 60s
   getChartTimeSettings: () => {

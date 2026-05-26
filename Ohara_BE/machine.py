@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request, current_app
 
 from settingmachine import (
     get_setting_machine_db,
-    get_active_threshold,
+    get_threshold_for_machine,
     calc_status,
     get_active_alarm_map,
 )
@@ -344,12 +344,7 @@ def create_sensor_reading():
         }), 404
 
     with get_setting_machine_db() as setting_conn:
-        threshold = get_active_threshold(setting_conn)
-
-    if not threshold:
-        return jsonify({
-            "message": "Chưa có threshold setting"
-        }), 400
+        threshold = get_threshold_for_machine(setting_conn, machine_id)
 
     status = calc_status(mold_temp, env_temp, humidity, threshold)
 
@@ -423,14 +418,6 @@ def create_fake_sensor_readings():
             ORDER BY id ASC;
         """).fetchall()
 
-    with get_setting_machine_db() as setting_conn:
-        threshold = get_active_threshold(setting_conn)
-
-    if not threshold:
-        return jsonify({
-            "message": "Chưa có threshold setting"
-        }), 400
-
     inserted = 0
     warning_count = 0
     alarm_count = 0
@@ -443,6 +430,7 @@ def create_fake_sensor_readings():
             env_temp = round(28 + machine_id * 0.08 + random.uniform(-2, 6), 1)
             humidity = round(55 + machine_id * 0.12 + random.uniform(-5, 12), 1)
 
+            threshold = get_threshold_for_machine(setting_conn, machine_id)
             status = calc_status(mold_temp, env_temp, humidity, threshold)
 
             machine_conn.execute("""
@@ -526,14 +514,6 @@ def create_fake_history():
             ORDER BY id ASC;
         """).fetchall()
 
-    with get_setting_machine_db() as setting_conn:
-        threshold = get_active_threshold(setting_conn)
-
-    if not threshold:
-        return jsonify({
-            "message": "Chưa có threshold setting"
-        }), 400
-
     inserted = 0
     current_time = start_time
 
@@ -548,8 +528,8 @@ def create_fake_history():
                 env_temp = round(28 + machine_id * 0.08 + random.uniform(-2, 6), 1)
                 humidity = round(55 + machine_id * 0.12 + random.uniform(-5, 12), 1)
 
+                threshold = get_threshold_for_machine(setting_conn, machine_id)
                 status = calc_status(mold_temp, env_temp, humidity, threshold)
-
                 machine_conn.execute("""
                     INSERT INTO sensor_readings (
                         machine_id,

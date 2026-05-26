@@ -41,7 +41,6 @@ const getInputDateFromLogTime = (value) => {
   if (!value) return "";
 
   const text = String(value).trim();
-
   const datePart = text.split(" ")[0];
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
@@ -266,19 +265,15 @@ export default function WarningLogDialog({
   };
 
   const warningCount = useMemo(
-    () => logs.filter((x) => x.status === "warning").length,
+    () => logs.filter((x) => x.status === "warning" && !x.isConfirmed).length,
     [logs]
   );
 
   const alarmCount = useMemo(
-    () => logs.filter((x) => x.status === "alarm").length,
+    () => logs.filter((x) => x.status === "alarm" && !x.isConfirmed).length,
     [logs]
   );
 
-  const activeCount = useMemo(
-    () => logs.filter((x) => !x.isConfirmed).length,
-    [logs]
-  );
 
   const columnTemplate =
     "70px 230px minmax(160px, 1fr) 170px 210px 130px 130px 150px";
@@ -362,15 +357,7 @@ export default function WarningLogDialog({
               flexShrink: 0,
             }}
           >
-            <Chip
-              label={`Active: ${activeCount}`}
-              sx={{
-                color: COLORS.head,
-                border: `1px solid ${COLORS.head}`,
-                bgcolor: COLORS.white,
-                fontWeight: 800,
-              }}
-            />
+    
 
             <Chip
               label={`Warning: ${warningCount}`}
@@ -568,9 +555,25 @@ export default function WarningLogDialog({
             ) : (
               logs.map((item, index) => {
                 const isConfirmed = Boolean(item.isConfirmed);
+                const isAlarm = item.status === "alarm";
 
-                const rowBg = isConfirmed ? COLORS.white : "#fef3c7";
-                const rowHoverBg = isConfirmed ? "#f8fafc" : "#fde68a";
+                const rowBg = isConfirmed
+                  ? "#f3f4f6"
+                  : isAlarm
+                  ? "#fef2f2"
+                  : "#fff7ed";
+
+                const rowHoverBg = isConfirmed
+                  ? "#e5e7eb"
+                  : isAlarm
+                  ? "#fee2e2"
+                  : "#ffedd5";
+
+                const statusColor = isConfirmed
+                  ? "#6b7280"
+                  : isAlarm
+                  ? COLORS.alarm
+                  : COLORS.warning;
 
                 return (
                   <Box
@@ -582,32 +585,35 @@ export default function WarningLogDialog({
                       bgcolor: rowBg,
                       minHeight: 42,
                       alignItems: "center",
-                      opacity: 1,
+                      opacity: isConfirmed ? 0.82 : 1,
                       transition: "0.18s ease",
                       "&:hover": {
                         bgcolor: rowHoverBg,
+                        opacity: 1,
                       },
                     }}
                   >
-                    <Cell colors={COLORS}>{index + 1}</Cell>
+                    <Cell colors={COLORS} muted={isConfirmed}>
+                      {index + 1}
+                    </Cell>
 
-                    <Cell colors={COLORS} bold>
+                    <Cell colors={COLORS} bold muted={isConfirmed}>
                       {formatDateTime(item.time)}
                     </Cell>
 
-                    <Cell colors={COLORS} bold>
+                    <Cell colors={COLORS} bold muted={isConfirmed}>
                       {item.machineName}
                     </Cell>
 
-                    <Cell colors={COLORS} bold align="center">
+                    <Cell colors={COLORS} bold align="center" muted={isConfirmed}>
                       {item.moldTemp}°C
                     </Cell>
 
-                    <Cell colors={COLORS} bold align="center">
+                    <Cell colors={COLORS} bold align="center" muted={isConfirmed}>
                       {item.envTemp}°C
                     </Cell>
 
-                    <Cell colors={COLORS} bold align="center">
+                    <Cell colors={COLORS} bold align="center" muted={isConfirmed}>
                       {item.hum}%
                     </Cell>
 
@@ -619,13 +625,13 @@ export default function WarningLogDialog({
                       }}
                     >
                       <Chip
-                        label={item.status === "alarm" ? "Alarm" : "Warning"}
+                        label={isAlarm ? "Alarm" : "Warning"}
                         size="small"
                         sx={{
                           minWidth: 86,
-                          color: isConfirmed ? COLORS.warning : COLORS.white,
-                          border: `1px solid ${COLORS.warning}`,
-                          bgcolor: isConfirmed ? COLORS.white : COLORS.warning,
+                          color: isConfirmed ? "#6b7280" : COLORS.white,
+                          border: `1px solid ${statusColor}`,
+                          bgcolor: isConfirmed ? "#f9fafb" : statusColor,
                           fontWeight: 800,
                         }}
                       />
@@ -644,9 +650,9 @@ export default function WarningLogDialog({
                           size="small"
                           sx={{
                             minWidth: 104,
-                            color: "#16a34a",
-                            border: "1px solid #16a34a",
-                            bgcolor: COLORS.white,
+                            color: "#6b7280",
+                            border: "1px solid #cbd5e1",
+                            bgcolor: "#f9fafb",
                             fontWeight: 800,
                           }}
                         />
@@ -688,14 +694,14 @@ export default function WarningLogDialog({
   );
 }
 
-function Cell({ children, bold = false, align = "left", colors }) {
+function Cell({ children, bold = false, align = "left", colors, muted = false }) {
   return (
     <Typography
       sx={{
         px: 1.2,
         fontSize: 13,
         fontWeight: bold ? 800 : 600,
-        color: colors.head,
+        color: muted ? "#6b7280" : colors.head,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",

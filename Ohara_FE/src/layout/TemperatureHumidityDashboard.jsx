@@ -57,15 +57,6 @@ const MACHINE_COLORS = [
   "#ef4444",
 ];
 
-const defaultSetting = {
-  warningMoldTemp: 80,
-  alarmMoldTemp: 90,
-  warningTemp: 32,
-  alarmTemp: 35,
-  warningHum: 62,
-  alarmHum: 68,
-};
-
 const statusStyle = {
   normal: {
     label: "Normal",
@@ -93,48 +84,20 @@ const statusStyle = {
   },
 };
 
-const getStatus = (m, setting) => {
-  if (!m) return "normal";
-
-  const moldTemp = Number(m.moldTemp ?? 0);
-  const temp = Number(m.temp ?? 0);
-  const hum = Number(m.hum ?? 0);
-
-  if (
-    moldTemp >= Number(setting.alarmMoldTemp) ||
-    temp >= Number(setting.alarmTemp) ||
-    hum >= Number(setting.alarmHum)
-  ) {
-    return "alarm";
-  }
-
-  if (
-    moldTemp >= Number(setting.warningMoldTemp) ||
-    temp >= Number(setting.warningTemp) ||
-    hum >= Number(setting.warningHum)
-  ) {
-    return "warning";
-  }
-
-  return "normal";
-};
-const getDisplayStatus = (m, setting) => {
+const getDisplayStatus = (m) => {
   if (!m) return "normal";
 
   if (m.isDisconnected || m.status === "disconnected") {
     return "disconnected";
   }
 
-  if (m.needConfirm && ["warning", "alarm"].includes(m.status)) {
-    return m.status;
-  }
-
   if (["normal", "warning", "alarm"].includes(m.status)) {
     return m.status;
   }
 
-  return getStatus(m, setting);
+  return "normal";
 };
+
 const getCardStatusColor = (status) => {
   if (status === "alarm") return "#dc2626";
   if (status === "warning") return "#d97706";
@@ -146,27 +109,20 @@ const formatMetric = (value, unit) => {
   if (value === null || value === undefined || value === "") return `--${unit}`;
   return `${value}${unit}`;
 };
-const isDataExpired = (recordedAt, limitSeconds = 90) => {
-  if (!recordedAt) return true;
 
-  const recordedDate = new Date(String(recordedAt).replace(" ", "T"));
-
-  if (Number.isNaN(recordedDate.getTime())) return true;
-
-  const diffSeconds = (Date.now() - recordedDate.getTime()) / 1000;
-
-  return diffSeconds > limitSeconds;
-};
 export default function TemperatureHumidityDashboard() {
   const [machines, setMachines] = useState([]);
-  const [setting, setSetting] = useState(defaultSetting);
   const [outdoorWeather, setOutdoorWeather] = useState({
     temp: null,
     hum: null,
     recordedAt: null,
+    isDisconnected: true,
   });
 
   const [settingOpen, setSettingOpen] = useState(false);
+  const [selectedSettingMachine, setSelectedSettingMachine] = useState(null);
+  const [machineSetting, setMachineSetting] = useState(null);
+
   const [chartOpen, setChartOpen] = useState(false);
   const [chartMode, setChartMode] = useState("all");
   const [selectedMachines, setSelectedMachines] = useState(null);
@@ -176,19 +132,6 @@ export default function TemperatureHumidityDashboard() {
   const [loading, setLoading] = useState(false);
 
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
-
-  const loadThresholdSetting = async () => {
-    try {
-      const thresholdRes = await temperatureHumidityApi.getThresholdSetting();
-
-      setSetting((prev) => ({
-        ...prev,
-        ...(thresholdRes.data || {}),
-      }));
-    } catch (error) {
-      console.error("Lỗi load threshold setting:", error);
-    }
-  };
 
   const loadOutdoorWeather = async () => {
     try {
@@ -201,7 +144,7 @@ export default function TemperatureHumidityDashboard() {
         isDisconnected: Boolean(res.data?.isDisconnected),
       });
     } catch (error) {
-      console.error("Lỗi load outdoor weather:", error);
+      console.error("Failed to load outdoor weather:", error);
 
       setOutdoorWeather({
         temp: null,
@@ -211,6 +154,7 @@ export default function TemperatureHumidityDashboard() {
       });
     }
   };
+
   const loadDashboardData = async () => {
     try {
       setLoading(true);
@@ -226,7 +170,7 @@ export default function TemperatureHumidityDashboard() {
         return nextMachines.map((m) => m.id);
       });
     } catch (error) {
-      console.error("Lỗi load machines:", error);
+      console.error("Failed to load machines:", error);
     } finally {
       setLoading(false);
     }
@@ -234,13 +178,9 @@ export default function TemperatureHumidityDashboard() {
 
   useEffect(() => {
     const loadAllDashboardData = async () => {
-      await Promise.all([
-        loadDashboardData(),
-        loadOutdoorWeather(),
-      ]);
+      await Promise.all([loadDashboardData(), loadOutdoorWeather()]);
     };
 
-    loadThresholdSetting();
     loadAllDashboardData();
 
     const dashboardTimer = setInterval(() => {
@@ -253,15 +193,20 @@ export default function TemperatureHumidityDashboard() {
   }, []);
 
   const summary = useMemo(() => {
-    const result = { normal: 0, warning: 0, alarm: 0 };
+    const result = {
+      normal: 0,
+      warning: 0,
+      alarm: 0,
+      disconnected: 0,
+    };
 
     machines.forEach((m) => {
-      const status = getDisplayStatus(m, setting);
+      const status = getDisplayStatus(m);
       result[status] = (result[status] || 0) + 1;
     });
 
     return result;
-  }, [machines, setting]);
+  }, [machines]);
 
   const openAllChart = () => {
     setChartMode("all");
@@ -270,32 +215,44 @@ export default function TemperatureHumidityDashboard() {
     setActionMenuOpen(false);
   };
 
-  const openMachineLog = (machine) => {
-    setSelectedLogMachine(machine);
-    setWarningLogOpen(true);
-  };
-
-  const openSetting = () => {
-    setSettingOpen(true);
-    setActionMenuOpen(false);
-  };
-
   const openWarningLog = () => {
+    setSelectedLogMachine(null);
     setWarningLogOpen(true);
     setActionMenuOpen(false);
+  };
+
+  const openMachineSetting = async (machine) => {
+    try {
+      setSelectedSettingMachine(machine);
+      setMachineSetting(null);
+
+      const res = await temperatureHumidityApi.getThresholdSetting(machine.id);
+
+      setMachineSetting(res.data || null);
+      setSettingOpen(true);
+    } catch (error) {
+      console.error("Failed to load machine threshold setting:", error);
+      alert("Unable to load this machine setting. Please check the API.");
+    }
+  };
+
+  const closeMachineSetting = () => {
+    setSettingOpen(false);
+    setSelectedSettingMachine(null);
+    setMachineSetting(null);
   };
 
   const toggleMachine = (id) => {
-  if (chartMode === "single") return;
+    if (chartMode === "single") return;
 
-  setSelectedMachines((prev) => {
-    const current = Array.isArray(prev) ? prev : [];
+    setSelectedMachines((prev) => {
+      const current = Array.isArray(prev) ? prev : [];
 
-    return current.includes(id)
-      ? current.filter((x) => x !== id)
-      : [...current, id].sort((a, b) => a - b);
-  });
-};
+      return current.includes(id)
+        ? current.filter((x) => x !== id)
+        : [...current, id].sort((a, b) => a - b);
+    });
+  };
 
   return (
     <Box
@@ -380,17 +337,26 @@ export default function TemperatureHumidityDashboard() {
             icon="✅"
             color="#16a34a"
           />
+
           <SummaryChip
             label="Warning"
             value={summary.warning}
             icon="⚠️"
             color="#d97706"
           />
+
           <SummaryChip
             label="Alarm"
             value={summary.alarm}
             icon="🔴"
             color="#dc2626"
+          />
+
+          <SummaryChip
+            label="No Data"
+            value={summary.disconnected}
+            icon="⚫"
+            color="#6b7280"
           />
 
           <ClickAwayListener onClickAway={() => setActionMenuOpen(false)}>
@@ -424,13 +390,6 @@ export default function TemperatureHumidityDashboard() {
                     icon={<ShowChartIcon />}
                     label="Chart"
                     onClick={openAllChart}
-                    color={COLORS.head}
-                  />
-
-                  <MenuActionButton
-                    icon={<SettingsIcon />}
-                    label="Setting"
-                    onClick={openSetting}
                     color={COLORS.head}
                   />
 
@@ -495,23 +454,23 @@ export default function TemperatureHumidityDashboard() {
               border: `1px solid ${COLORS.border}`,
             }}
           >
-            {loading ? "Đang tải dữ liệu máy..." : "Chưa có dữ liệu máy"}
+            {loading ? "Loading machine data..." : "No machine data available"}
           </Paper>
         )}
 
         {machines.map((m) => {
-          const status = getDisplayStatus(m, setting);
+          const status = getDisplayStatus(m);
           const s = statusStyle[status] || statusStyle.normal;
           const statusColor = getCardStatusColor(status);
+
           return (
             <Paper
               key={m.id}
-              onClick={() => openMachineLog(m)}
               elevation={0}
               sx={{
                 p: 1.15,
                 borderRadius: 2.5,
-                cursor: "pointer",
+                cursor: "default",
                 border: `1px solid ${COLORS.border}`,
                 borderTop: `5px solid ${statusColor}`,
                 boxShadow: "0 4px 12px rgba(15,23,42,0.1)",
@@ -522,6 +481,7 @@ export default function TemperatureHumidityDashboard() {
                 minHeight: 0,
                 overflow: "hidden",
                 bgcolor: COLORS.white,
+                position: "relative",
                 transition: "0.18s ease",
                 "&:hover": {
                   transform: "translateY(-2px)",
@@ -530,6 +490,33 @@ export default function TemperatureHumidityDashboard() {
                 },
               }}
             >
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openMachineSetting(m);
+                }}
+                sx={{
+                  position: "absolute",
+                  top: 7,
+                  right: 7,
+                  width: 28,
+                  height: 28,
+                  borderRadius: 2,
+                  bgcolor: "#f8fafc",
+                  color: COLORS.head,
+                  border: `1px solid ${COLORS.border}`,
+                  zIndex: 3,
+                  "&:hover": {
+                    bgcolor: COLORS.head,
+                    color: COLORS.white,
+                    borderColor: COLORS.head,
+                  },
+                }}
+              >
+                <SettingsIcon sx={{ fontSize: 17 }} />
+              </IconButton>
+
               <Box
                 sx={{
                   display: "flex",
@@ -537,6 +524,7 @@ export default function TemperatureHumidityDashboard() {
                   alignItems: "center",
                   gap: 0.45,
                   width: "100%",
+                  pr: 4,
                 }}
               >
                 <Box
@@ -551,7 +539,7 @@ export default function TemperatureHumidityDashboard() {
                     fontSize: 12.5,
                     lineHeight: 1.1,
                     whiteSpace: "nowrap",
-                    maxWidth: 135,
+                    maxWidth: 115,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                   }}
@@ -575,11 +563,13 @@ export default function TemperatureHumidityDashboard() {
                   icon="🔥"
                   value={formatMetric(m.moldTemp, "°C")}
                 />
+
                 <MetricBox
                   label="OUT TEMP"
                   icon="🌡️"
                   value={formatMetric(m.temp, "°C")}
                 />
+
                 <MetricBox
                   label="HUMIDITY"
                   icon="💧"
@@ -609,13 +599,20 @@ export default function TemperatureHumidityDashboard() {
 
       <ThresholdSettingDialog
         open={settingOpen}
-        onClose={() => setSettingOpen(false)}
-        setting={setting}
+        onClose={closeMachineSetting}
+        machine={selectedSettingMachine}
+        setting={machineSetting}
         colors={COLORS}
         fontFamily={FONT_FAMILY}
         onSave={async (newSetting) => {
-          await temperatureHumidityApi.updateThresholdSetting(newSetting);
-          setSetting(newSetting);
+          if (!selectedSettingMachine?.id) return;
+
+          await temperatureHumidityApi.updateThresholdSetting({
+            ...newSetting,
+            machineId: selectedSettingMachine.id,
+          });
+
+          await loadDashboardData();
         }}
       />
 

@@ -12,6 +12,8 @@ import {
   IconButton,
   Select,
   MenuItem,
+  TextField,
+  Popover,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import {
@@ -52,89 +54,70 @@ const parseDbDateTime = (value) => {
   return date;
 };
 
-const isSameDate = (dateA, dateB) => {
-  if (!dateA || !dateB) return false;
+const formatDateTimeLocalInput = (date) => {
+  if (!date) return "";
 
-  return (
-    dateA.getFullYear() === dateB.getFullYear() &&
-    dateA.getMonth() === dateB.getMonth() &&
-    dateA.getDate() === dateB.getDate()
-  );
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-const formatTimeOnly = (date) => {
-  if (!date) return "--:--:--";
+const parseDateTimeLocalInput = (value) => {
+  if (!value) return null;
 
-  return date.toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date;
+};
+const formatDateDisplay = (date) => {
+  if (!date) return "";
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
 };
 
-const formatDateOnly = (date) => {
-  if (!date) return "--/--/----";
+const formatTimeDisplay12h = (date) => {
+  if (!date) return "";
 
-  return date.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
+  let hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const suffix = hours >= 12 ? "PM" : "AM";
+
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+
+  return `${String(hours).padStart(2, "0")}:${minutes} ${suffix}`;
 };
 
-const formatDateTimeShort = (date) => {
-  if (!date) return "--";
+const formatDateInput = (date) => {
+  if (!date) return "";
 
-  return date.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 };
 
-const formatTimelineText = (startDate, endDate) => {
-  if (!startDate || !endDate) {
-    return "--/--/---- | --:--:-- → --:--:--";
-  }
+const formatTimeInput = (date) => {
+  if (!date) return "";
 
-  if (isSameDate(startDate, endDate)) {
-    return `${formatDateOnly(startDate)} | ${formatTimeOnly(
-      startDate
-    )} → ${formatTimeOnly(endDate)}`;
-  }
+  const pad = (n) => String(n).padStart(2, "0");
 
-  return `${formatDateTimeShort(startDate)} → ${formatDateTimeShort(endDate)}`;
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-const formatWindowDuration = (timeRange) => {
-  const totalSeconds = Number(timeRange || 10) * CHART_POINTS;
+const combineDateAndTimeInput = (dateValue, timeValue) => {
+  if (!dateValue || !timeValue) return null;
 
-  if (totalSeconds < 60) {
-    return `${totalSeconds} seconds`;
-  }
+  const date = new Date(`${dateValue}T${timeValue}`);
+  if (Number.isNaN(date.getTime())) return null;
 
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-
-  if (minutes < 60) {
-    return seconds > 0
-      ? `${minutes} minutes ${seconds} seconds`
-      : `${minutes} minutes`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remainMinutes = minutes % 60;
-
-  return remainMinutes > 0
-    ? `${hours} hours ${remainMinutes} minutes`
-    : `${hours} hours`;
+  return date;
 };
-
 export default function MachineChartDialog({
   open,
   onClose,
@@ -163,25 +146,33 @@ export default function MachineChartDialog({
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [latestMachineMap, setLatestMachineMap] = useState({});
 
-  const [timeOffsetPage, setTimeOffsetPage] = useState(0);
-  // 0 = latest realtime window
-  // 1 = back 1 window of 100 points
-  // 2 = back 2 windows of 100 points
+  // null = realtime latest window
+  // Date = history mode, load 100 chart points ending at this selected datetime
+  const [selectedEndTime, setSelectedEndTime] = useState(null);
 
   const noDataLimitSeconds = Math.max(
     Number(timeRange || 10) * NO_DATA_LIMIT_MULTIPLIER,
     30
   );
 
-  const getChartEndTimeByPage = useCallback(
-    (page, interval = timeRange) => {
-      if (!page || page <= 0) return null;
-
-      const windowMs = Number(interval || 10) * CHART_POINTS * 1000;
-      return new Date(Date.now() - page * windowMs);
+  const getWindowMs = useCallback(
+    (interval = timeRange) => {
+      return Number(interval || 10) * CHART_POINTS * 1000;
     },
     [timeRange]
   );
+
+  const formatApiDateTime = (date) => {
+    if (!date) return "";
+
+    const pad = (n) => String(n).padStart(2, "0");
+
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+      date.getDate()
+    )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+      date.getSeconds()
+    )}`;
+  };
 
   const loadLatestMachines = useCallback(async () => {
     try {
@@ -204,19 +195,19 @@ export default function MachineChartDialog({
   }, []);
 
   const loadChartData = useCallback(
-    async (interval, showLoading = true, page = timeOffsetPage) => {
+    async (interval, showLoading = true, endTimeValue = selectedEndTime) => {
       try {
         if (showLoading) {
           setLoading(true);
         }
 
-        const endTime = getChartEndTimeByPage(page, interval);
+        const endTime = endTimeValue ? new Date(endTimeValue) : null;
 
         const [chartRes] = await Promise.all([
           temperatureHumidityApi.getChartData({
             interval,
             points: CHART_POINTS,
-            ...(endTime ? { endTime: endTime.toISOString() } : {}),
+            ...(endTime ? { endTime: formatApiDateTime(endTime) } : {}),
           }),
           loadLatestMachines(),
         ]);
@@ -226,14 +217,14 @@ export default function MachineChartDialog({
       } catch (error) {
         console.error("Failed to load chart data:", error);
         setHistory([]);
-        setLastRefreshAt(new Date());
+        setLastRefreshAt(endTimeValue ? new Date(endTimeValue) : new Date());
       } finally {
         if (showLoading) {
           setLoading(false);
         }
       }
     },
-    [loadLatestMachines, getChartEndTimeByPage, timeOffsetPage]
+    [loadLatestMachines, selectedEndTime]
   );
 
   useEffect(() => {
@@ -242,7 +233,7 @@ export default function MachineChartDialog({
       setHistory([]);
       setLastRefreshAt(null);
       setLatestMachineMap({});
-      setTimeOffsetPage(0);
+      setSelectedEndTime(null);
       return;
     }
 
@@ -277,9 +268,9 @@ export default function MachineChartDialog({
 
         setTimeOptions(nextTimeOptions);
         setTimeRange(nextTimeRange);
-        setTimeOffsetPage(0);
+        setSelectedEndTime(null);
 
-        await loadChartData(nextTimeRange, false, 0);
+        await loadChartData(nextTimeRange, false, null);
 
         setChartInitialized(true);
       } catch (error) {
@@ -298,18 +289,18 @@ export default function MachineChartDialog({
   }, [open, chartInitialized, loadChartData]);
 
   useEffect(() => {
-    if (!open || !chartInitialized || timeOffsetPage > 0) return;
+    if (!open || !chartInitialized || selectedEndTime) return;
 
     const reloadMs = Math.max(Number(timeRange || 10), 5) * 1000;
 
     const timer = window.setInterval(() => {
-      loadChartData(timeRange, false, 0);
+      loadChartData(timeRange, false, null);
     }, reloadMs);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [open, chartInitialized, timeRange, timeOffsetPage, loadChartData]);
+  }, [open, chartInitialized, timeRange, selectedEndTime, loadChartData]);
 
   const disconnectedMachineIds = useMemo(() => {
     if (!lastRefreshAt) return [];
@@ -351,32 +342,6 @@ export default function MachineChartDialog({
     });
   }, [history, disconnectedMachineIds]);
 
-  const chartViewWindow = useMemo(() => {
-    if (!lastRefreshAt) {
-      return {
-        startDate: null,
-        endDate: null,
-        text: "--:--:-- → --:--:--",
-      };
-    }
-
-    const intervalMs = Number(timeRange || 10) * 1000;
-
-    // 100 points have 99 intervals between the first and last point.
-    // Using 99 keeps the timeline aligned with the displayed 100 points.
-    const startDate = new Date(
-      lastRefreshAt.getTime() - (CHART_POINTS - 1) * intervalMs
-    );
-
-    const endDate = lastRefreshAt;
-
-    return {
-      startDate,
-      endDate,
-      text: formatTimelineText(startDate, endDate),
-    };
-  }, [lastRefreshAt, timeRange]);
-
   const charts = useMemo(() => {
     const allCharts = [
       {
@@ -412,20 +377,49 @@ export default function MachineChartDialog({
       : "1fr";
 
   const handleBackTime = useCallback(async () => {
-    const nextPage = timeOffsetPage + 1;
+    const baseEndTime = selectedEndTime || lastRefreshAt || new Date();
+    const nextEndTime = new Date(baseEndTime.getTime() - getWindowMs(timeRange));
 
-    setTimeOffsetPage(nextPage);
-    await loadChartData(timeRange, true, nextPage);
-  }, [timeOffsetPage, loadChartData, timeRange]);
+    setSelectedEndTime(nextEndTime);
+    await loadChartData(timeRange, true, nextEndTime);
+  }, [selectedEndTime, lastRefreshAt, getWindowMs, loadChartData, timeRange]);
 
   const handleNextTime = useCallback(async () => {
-    if (timeOffsetPage <= 0) return;
+    if (!selectedEndTime) return;
 
-    const nextPage = timeOffsetPage - 1;
+    const now = new Date();
+    const nextEndTime = new Date(
+      selectedEndTime.getTime() + getWindowMs(timeRange)
+    );
 
-    setTimeOffsetPage(nextPage);
-    await loadChartData(timeRange, true, nextPage);
-  }, [timeOffsetPage, loadChartData, timeRange]);
+    if (nextEndTime >= now) {
+      setSelectedEndTime(null);
+      await loadChartData(timeRange, true, null);
+      return;
+    }
+
+    setSelectedEndTime(nextEndTime);
+    await loadChartData(timeRange, true, nextEndTime);
+  }, [selectedEndTime, getWindowMs, loadChartData, timeRange]);
+
+  const handleDateTimeChange = useCallback(
+    async (dateValue, timeValue) => {
+      const nextEndTime = combineDateAndTimeInput(dateValue, timeValue);
+
+      if (!nextEndTime) {
+        setSelectedEndTime(null);
+        await loadChartData(timeRange, true, null);
+        return;
+      }
+
+      const now = new Date();
+      const safeEndTime = nextEndTime > now ? now : nextEndTime;
+
+      setSelectedEndTime(safeEndTime);
+      await loadChartData(timeRange, true, safeEndTime);
+    },
+    [loadChartData, timeRange]
+  );
 
   const title =
     chartMode === "single"
@@ -521,15 +515,15 @@ export default function MachineChartDialog({
               setTimeRange={setTimeRange}
               onTimeRangeChange={async (nextTimeRange) => {
                 setTimeRange(nextTimeRange);
-                await loadChartData(nextTimeRange, true, timeOffsetPage);
+                await loadChartData(nextTimeRange, true, selectedEndTime);
               }}
               timeOptions={timeOptions}
               loading={loading}
+              selectedEndTime={selectedEndTime}
               lastRefreshAt={lastRefreshAt}
-              timeOffsetPage={timeOffsetPage}
               onBackTime={handleBackTime}
               onNextTime={handleNextTime}
-              chartViewWindow={chartViewWindow}
+              onDateTimeChange={handleDateTimeChange}
             />
 
             <Box
@@ -616,13 +610,28 @@ function ChartToolbar({
   onTimeRangeChange,
   timeOptions,
   loading,
-  timeOffsetPage,
+  selectedEndTime,
+  lastRefreshAt,
   onBackTime,
   onNextTime,
-  chartViewWindow,
+  onDateTimeChange,
 }) {
+  const [pickerAnchorEl, setPickerAnchorEl] = React.useState(null);
+
   const isAllChecked = visibleCharts.length === CHART_OPTIONS.length;
-  const isHistoryMode = timeOffsetPage > 0;
+  const isHistoryMode = Boolean(selectedEndTime);
+
+  const currentDateTime = selectedEndTime || lastRefreshAt || new Date();
+  const currentDateValue = formatDateInput(currentDateTime);
+  const currentTimeValue = formatTimeInput(currentDateTime);
+
+  const [draftDate, setDraftDate] = React.useState(currentDateValue);
+  const [draftTime, setDraftTime] = React.useState(currentTimeValue);
+
+  useEffect(() => {
+    setDraftDate(currentDateValue);
+    setDraftTime(currentTimeValue);
+  }, [currentDateValue, currentTimeValue]);
 
   const handleToggleAll = () => {
     if (isAllChecked) {
@@ -637,7 +646,6 @@ function ChartToolbar({
       if (prev.includes(value)) {
         return prev.filter((x) => x !== value);
       }
-
       return [...prev, value];
     });
   };
@@ -651,8 +659,13 @@ function ChartToolbar({
           .map((item) => item.label)
           .join(", ");
 
-  const timelineText = chartViewWindow?.text || "--:--:-- → --:--:--";
-  const windowText = formatWindowDuration(timeRange);
+  const openPicker = Boolean(pickerAnchorEl);
+
+  const applyDateTimeChange = async (nextDate, nextTime) => {
+    setDraftDate(nextDate);
+    setDraftTime(nextTime);
+    await onDateTimeChange(nextDate, nextTime);
+  };
 
   return (
     <Paper
@@ -703,12 +716,7 @@ function ChartToolbar({
           <MenuItem
             value="all"
             onClick={handleToggleAll}
-            sx={{
-              fontFamily,
-              fontSize: 13,
-              fontWeight: 800,
-              gap: 1,
-            }}
+            sx={{ fontFamily, fontSize: 13, fontWeight: 800, gap: 1 }}
           >
             <Checkbox
               checked={isAllChecked}
@@ -731,12 +739,7 @@ function ChartToolbar({
               key={item.value}
               value={item.value}
               onClick={() => handleToggleChart(item.value)}
-              sx={{
-                fontFamily,
-                fontSize: 13,
-                fontWeight: 800,
-                gap: 1,
-              }}
+              sx={{ fontFamily, fontSize: 13, fontWeight: 800, gap: 1 }}
             >
               <Checkbox
                 checked={visibleCharts.includes(item.value)}
@@ -777,42 +780,172 @@ function ChartToolbar({
           ◀ Back
         </Button>
 
-        <Box
+        <Button
+          onClick={(e) => setPickerAnchorEl(e.currentTarget)}
+          disabled={loading}
+          variant="outlined"
           sx={{
             height: 34,
-            px: 1.4,
-            borderRadius: 2,
-            border: `1px solid ${isHistoryMode ? "#fed7aa" : "#bbf7d0"}`,
-            bgcolor: isHistoryMode ? "#fff7ed" : "#ecfdf5",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
+            minWidth: "unset",
             width: "fit-content",
-            maxWidth: 420,
-            overflow: "hidden",
+            px: 1.1,
+            borderRadius: 2,
+            fontFamily,
+            fontSize: 12,
+            fontWeight: 900,
+            textTransform: "none",
+            color: colors.head,
+            borderColor: isHistoryMode ? "#fed7aa" : "#bbf7d0",
+            bgcolor: isHistoryMode ? "#fff7ed" : "#ecfdf5",
+            justifyContent: "center",
+            boxShadow: "none",
+            whiteSpace: "nowrap",
+            "&:hover": {
+              borderColor: colors.head,
+              boxShadow: "none",
+              bgcolor: isHistoryMode ? "#ffedd5" : "#dcfce7",
+            },
           }}
-          title={`Current time range: ${timelineText} | 1 window = ${windowText}`}
         >
-          <Typography
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.7 }}>
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 12,
+                fontWeight: 900,
+                color: colors.head,
+              }}
+            >
+              {formatDateDisplay(currentDateTime)}
+            </Typography>
+
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 12,
+                fontWeight: 700,
+                color: "#9ca3af",
+              }}
+            >
+              |
+            </Typography>
+
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 12,
+                fontWeight: 900,
+                color: colors.head,
+              }}
+            >
+              {formatTimeDisplay12h(currentDateTime)}
+            </Typography>
+          </Box>
+        </Button>
+
+        <Popover
+          open={openPicker}
+          anchorEl={pickerAnchorEl}
+          onClose={() => setPickerAnchorEl(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+          transformOrigin={{ vertical: "top", horizontal: "center" }}
+          slotProps={{
+            paper: {
+              sx: {
+                mt: 1,
+                p: 1.25,
+                borderRadius: 2.5,
+                border: `1px solid ${colors.border}`,
+                boxShadow: "0 10px 28px rgba(15,23,42,0.14)",
+              },
+            },
+          }}
+        >
+          <Box
             sx={{
-              fontFamily,
-              fontSize: 11,
-              fontWeight: 900,
-              color: colors.head,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              textAlign: "center",
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
             }}
           >
-            {timelineText}
-          </Typography>
-        </Box>
+            <TextField
+              size="small"
+              type="date"
+              value={draftDate}
+              inputProps={{ max: formatDateInput(new Date()) }}
+              onChange={async (e) => {
+                const nextDate = e.target.value;
+                setDraftDate(nextDate);
+                await applyDateTimeChange(nextDate, draftTime);
+              }}
+              sx={{
+                width: 145,
+                "& .MuiInputBase-root": {
+                  height: 36,
+                  borderRadius: 2,
+                  fontFamily,
+                  fontSize: 12,
+                  fontWeight: 800,
+                  bgcolor: colors.white,
+                },
+                "& .MuiInputBase-input": {
+                  py: 0.7,
+                  px: 1,
+                  fontFamily,
+                  fontSize: 12,
+                  fontWeight: 800,
+                },
+              }}
+            />
+
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 18,
+                fontWeight: 700,
+                color: "#9ca3af",
+                px: 0.2,
+                lineHeight: 1,
+              }}
+            >
+              |
+            </Typography>
+
+            <TextField
+              size="small"
+              type="time"
+              value={draftTime}
+              onChange={async (e) => {
+                const nextTime = e.target.value;
+                setDraftTime(nextTime);
+                await applyDateTimeChange(draftDate, nextTime);
+              }}
+              sx={{
+                width: 110,
+                "& .MuiInputBase-root": {
+                  height: 36,
+                  borderRadius: 2,
+                  fontFamily,
+                  fontSize: 12,
+                  fontWeight: 800,
+                  bgcolor: colors.white,
+                },
+                "& .MuiInputBase-input": {
+                  py: 0.7,
+                  px: 1,
+                  fontFamily,
+                  fontSize: 12,
+                  fontWeight: 800,
+                },
+              }}
+            />
+          </Box>
+        </Popover>
 
         <Button
           size="small"
           variant="outlined"
-          disabled={loading || !isHistoryMode}
+          disabled={loading || !selectedEndTime}
           onClick={onNextTime}
           sx={timeNavButtonSx(colors, fontFamily)}
         >
