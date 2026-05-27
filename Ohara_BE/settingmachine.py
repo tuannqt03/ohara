@@ -8,9 +8,12 @@ settingmachine_bp = Blueprint("settingmachine", __name__)
 
 
 # Default demo-safe thresholds:
-# Mold:    base 70, warning 60-80, alarm 55-85
-# Env:     base 35, warning 31-39, alarm 29-41
+# Mold:     base 70, warning 60-80, alarm 55-85
+# Env:      base 35, warning 31-39, alarm 29-41
 # Humidity: base 58, warning 55-61, alarm 53-63
+#
+# IMPORTANT:
+# Sau này muốn đổi default thì chỉ sửa ở đây.
 DEFAULT_MACHINE_THRESHOLDS = {
     "mold_temp_base": 70,
     "mold_temp_warning_delta": 10,
@@ -24,6 +27,10 @@ DEFAULT_MACHINE_THRESHOLDS = {
     "humidity_warning_delta": 3,
     "humidity_alarm_delta": 5,
 }
+
+
+def default_sql(key):
+    return DEFAULT_MACHINE_THRESHOLDS[key]
 
 
 def get_setting_machine_db():
@@ -108,30 +115,30 @@ def ensure_warning_log_columns():
 
 def ensure_machine_threshold_table():
     """
-    Bảng setting chuẩn mới:
+    Bảng setting chuẩn:
     - Không dùng low/high cũ.
     - Chỉ dùng base + warning_delta + alarm_delta.
-    - User có thể chỉnh bất kỳ base nào, ví dụ 37, 92...
     - Backend tính cảnh báo theo abs(value - base).
+    - Default lấy từ DEFAULT_MACHINE_THRESHOLDS, không hard-code lặp lại.
     """
 
     with get_setting_machine_db() as conn:
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS machine_threshold_settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 machine_id INTEGER NOT NULL UNIQUE,
 
-                mold_temp_base REAL NOT NULL DEFAULT 70,
-                mold_temp_warning_delta REAL NOT NULL DEFAULT 10,
-                mold_temp_alarm_delta REAL NOT NULL DEFAULT 15,
+                mold_temp_base REAL NOT NULL DEFAULT {default_sql("mold_temp_base")},
+                mold_temp_warning_delta REAL NOT NULL DEFAULT {default_sql("mold_temp_warning_delta")},
+                mold_temp_alarm_delta REAL NOT NULL DEFAULT {default_sql("mold_temp_alarm_delta")},
 
-                env_temp_base REAL NOT NULL DEFAULT 35,
-                env_temp_warning_delta REAL NOT NULL DEFAULT 4,
-                env_temp_alarm_delta REAL NOT NULL DEFAULT 6,
+                env_temp_base REAL NOT NULL DEFAULT {default_sql("env_temp_base")},
+                env_temp_warning_delta REAL NOT NULL DEFAULT {default_sql("env_temp_warning_delta")},
+                env_temp_alarm_delta REAL NOT NULL DEFAULT {default_sql("env_temp_alarm_delta")},
 
-                humidity_base REAL NOT NULL DEFAULT 58,
-                humidity_warning_delta REAL NOT NULL DEFAULT 3,
-                humidity_alarm_delta REAL NOT NULL DEFAULT 5,
+                humidity_base REAL NOT NULL DEFAULT {default_sql("humidity_base")},
+                humidity_warning_delta REAL NOT NULL DEFAULT {default_sql("humidity_warning_delta")},
+                humidity_alarm_delta REAL NOT NULL DEFAULT {default_sql("humidity_alarm_delta")},
 
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -145,17 +152,17 @@ def ensure_machine_threshold_table():
         column_names = {column["name"] for column in columns}
 
         columns_to_add = [
-            ("mold_temp_base", "REAL NOT NULL DEFAULT 70"),
-            ("mold_temp_warning_delta", "REAL NOT NULL DEFAULT 10"),
-            ("mold_temp_alarm_delta", "REAL NOT NULL DEFAULT 15"),
+            ("mold_temp_base", f"REAL NOT NULL DEFAULT {default_sql('mold_temp_base')}"),
+            ("mold_temp_warning_delta", f"REAL NOT NULL DEFAULT {default_sql('mold_temp_warning_delta')}"),
+            ("mold_temp_alarm_delta", f"REAL NOT NULL DEFAULT {default_sql('mold_temp_alarm_delta')}"),
 
-            ("env_temp_base", "REAL NOT NULL DEFAULT 35"),
-            ("env_temp_warning_delta", "REAL NOT NULL DEFAULT 4"),
-            ("env_temp_alarm_delta", "REAL NOT NULL DEFAULT 6"),
+            ("env_temp_base", f"REAL NOT NULL DEFAULT {default_sql('env_temp_base')}"),
+            ("env_temp_warning_delta", f"REAL NOT NULL DEFAULT {default_sql('env_temp_warning_delta')}"),
+            ("env_temp_alarm_delta", f"REAL NOT NULL DEFAULT {default_sql('env_temp_alarm_delta')}"),
 
-            ("humidity_base", "REAL NOT NULL DEFAULT 58"),
-            ("humidity_warning_delta", "REAL NOT NULL DEFAULT 3"),
-            ("humidity_alarm_delta", "REAL NOT NULL DEFAULT 5"),
+            ("humidity_base", f"REAL NOT NULL DEFAULT {default_sql('humidity_base')}"),
+            ("humidity_warning_delta", f"REAL NOT NULL DEFAULT {default_sql('humidity_warning_delta')}"),
+            ("humidity_alarm_delta", f"REAL NOT NULL DEFAULT {default_sql('humidity_alarm_delta')}"),
 
             ("created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
             ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
@@ -180,7 +187,7 @@ def get_threshold_value(threshold, key):
 
 def normalize_threshold_row(row):
     """
-    Đảm bảo nếu DB cũ có giá trị NULL thì vẫn fallback về default.
+    Đảm bảo nếu DB cũ có giá trị NULL thì fallback về default.
     """
 
     if not row:
