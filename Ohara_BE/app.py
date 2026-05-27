@@ -20,7 +20,17 @@ SETTING_MACHINE_DB_PATH = DB_DIR / "settingmachine.db"
 
 def create_app():
     app = Flask(__name__)
-    CORS(app)
+
+    CORS(
+        app,
+        origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://10.73.132.115:5173",
+        ],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
 
     app.config["BASE_DIR"] = BASE_DIR
     app.config["DB_DIR"] = DB_DIR
@@ -31,8 +41,8 @@ def create_app():
     app.register_blueprint(settingmachine_bp)
 
     with app.app_context():
-      ensure_warning_log_columns()
-      ensure_machine_threshold_table()
+        ensure_warning_log_columns()
+        ensure_machine_threshold_table()
 
     @app.route("/")
     def home():

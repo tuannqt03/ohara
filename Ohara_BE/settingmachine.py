@@ -7,18 +7,22 @@ from flask import Blueprint, jsonify, request, current_app
 settingmachine_bp = Blueprint("settingmachine", __name__)
 
 
+# Default demo-safe thresholds:
+# Mold:    base 70, warning 60-80, alarm 55-85
+# Env:     base 35, warning 31-39, alarm 29-41
+# Humidity: base 58, warning 55-61, alarm 53-63
 DEFAULT_MACHINE_THRESHOLDS = {
     "mold_temp_base": 70,
-    "mold_temp_warning_delta": 2,
-    "mold_temp_alarm_delta": 4,
+    "mold_temp_warning_delta": 10,
+    "mold_temp_alarm_delta": 15,
 
-    "env_temp_base": 25,
-    "env_temp_warning_delta": 2,
-    "env_temp_alarm_delta": 4,
+    "env_temp_base": 35,
+    "env_temp_warning_delta": 4,
+    "env_temp_alarm_delta": 6,
 
-    "humidity_base": 50,
-    "humidity_warning_delta": 5,
-    "humidity_alarm_delta": 10,
+    "humidity_base": 58,
+    "humidity_warning_delta": 3,
+    "humidity_alarm_delta": 5,
 }
 
 
@@ -40,6 +44,23 @@ def ensure_warning_log_columns():
     conn.row_factory = sqlite3.Row
 
     try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS warning_alarm_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                machine_id INTEGER NOT NULL,
+                mold_temp REAL NOT NULL,
+                env_temp REAL NOT NULL,
+                humidity REAL NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('warning', 'alarm')),
+                message TEXT,
+                occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_confirmed INTEGER NOT NULL DEFAULT 0,
+                confirmed_at DATETIME,
+                confirmed_by TEXT,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+
         columns = conn.execute("""
             PRAGMA table_info(warning_alarm_logs);
         """).fetchall()
@@ -70,12 +91,30 @@ def ensure_warning_log_columns():
                 ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
             """)
 
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_warning_logs_active
+            ON warning_alarm_logs (is_deleted, is_confirmed, machine_id, occurred_at DESC);
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_warning_logs_filter
+            ON warning_alarm_logs (is_deleted, machine_id, status, occurred_at DESC);
+        """)
+
         conn.commit()
     finally:
         conn.close()
 
 
 def ensure_machine_threshold_table():
+    """
+    Bảng setting chuẩn mới:
+    - Không dùng low/high cũ.
+    - Chỉ dùng base + warning_delta + alarm_delta.
+    - User có thể chỉnh bất kỳ base nào, ví dụ 37, 92...
+    - Backend tính cảnh báo theo abs(value - base).
+    """
+
     with get_setting_machine_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS machine_threshold_settings (
@@ -83,16 +122,16 @@ def ensure_machine_threshold_table():
                 machine_id INTEGER NOT NULL UNIQUE,
 
                 mold_temp_base REAL NOT NULL DEFAULT 70,
-                mold_temp_warning_delta REAL NOT NULL DEFAULT 2,
-                mold_temp_alarm_delta REAL NOT NULL DEFAULT 4,
+                mold_temp_warning_delta REAL NOT NULL DEFAULT 10,
+                mold_temp_alarm_delta REAL NOT NULL DEFAULT 15,
 
-                env_temp_base REAL NOT NULL DEFAULT 25,
-                env_temp_warning_delta REAL NOT NULL DEFAULT 2,
-                env_temp_alarm_delta REAL NOT NULL DEFAULT 4,
+                env_temp_base REAL NOT NULL DEFAULT 35,
+                env_temp_warning_delta REAL NOT NULL DEFAULT 4,
+                env_temp_alarm_delta REAL NOT NULL DEFAULT 6,
 
-                humidity_base REAL NOT NULL DEFAULT 50,
-                humidity_warning_delta REAL NOT NULL DEFAULT 5,
-                humidity_alarm_delta REAL NOT NULL DEFAULT 10,
+                humidity_base REAL NOT NULL DEFAULT 58,
+                humidity_warning_delta REAL NOT NULL DEFAULT 3,
+                humidity_alarm_delta REAL NOT NULL DEFAULT 5,
 
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -107,16 +146,19 @@ def ensure_machine_threshold_table():
 
         columns_to_add = [
             ("mold_temp_base", "REAL NOT NULL DEFAULT 70"),
-            ("mold_temp_warning_delta", "REAL NOT NULL DEFAULT 2"),
-            ("mold_temp_alarm_delta", "REAL NOT NULL DEFAULT 4"),
+            ("mold_temp_warning_delta", "REAL NOT NULL DEFAULT 10"),
+            ("mold_temp_alarm_delta", "REAL NOT NULL DEFAULT 15"),
 
-            ("env_temp_base", "REAL NOT NULL DEFAULT 25"),
-            ("env_temp_warning_delta", "REAL NOT NULL DEFAULT 2"),
-            ("env_temp_alarm_delta", "REAL NOT NULL DEFAULT 4"),
+            ("env_temp_base", "REAL NOT NULL DEFAULT 35"),
+            ("env_temp_warning_delta", "REAL NOT NULL DEFAULT 4"),
+            ("env_temp_alarm_delta", "REAL NOT NULL DEFAULT 6"),
 
-            ("humidity_base", "REAL NOT NULL DEFAULT 50"),
-            ("humidity_warning_delta", "REAL NOT NULL DEFAULT 5"),
-            ("humidity_alarm_delta", "REAL NOT NULL DEFAULT 10"),
+            ("humidity_base", "REAL NOT NULL DEFAULT 58"),
+            ("humidity_warning_delta", "REAL NOT NULL DEFAULT 3"),
+            ("humidity_alarm_delta", "REAL NOT NULL DEFAULT 5"),
+
+            ("created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
+            ("updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP"),
         ]
 
         for column_name, column_def in columns_to_add:
@@ -136,6 +178,27 @@ def get_threshold_value(threshold, key):
     return threshold[key]
 
 
+def normalize_threshold_row(row):
+    """
+    Đảm bảo nếu DB cũ có giá trị NULL thì vẫn fallback về default.
+    """
+
+    if not row:
+        return DEFAULT_MACHINE_THRESHOLDS
+
+    result = {}
+
+    for key, default_value in DEFAULT_MACHINE_THRESHOLDS.items():
+        try:
+            value = row[key]
+        except Exception:
+            value = None
+
+        result[key] = default_value if value is None else value
+
+    return result
+
+
 def get_threshold_for_machine(conn, machine_id):
     ensure_machine_threshold_table()
 
@@ -147,12 +210,25 @@ def get_threshold_for_machine(conn, machine_id):
     """, (machine_id,)).fetchone()
 
     if row:
-        return row
+        return normalize_threshold_row(row)
 
     return DEFAULT_MACHINE_THRESHOLDS
 
 
 def calc_one_value_status(value, base, warning_delta, alarm_delta):
+    """
+    Logic chuẩn:
+    - Normal nếu abs(value - base) < warning_delta
+    - Warning nếu warning_delta <= abs(value - base) < alarm_delta
+    - Alarm nếu abs(value - base) >= alarm_delta
+
+    Ví dụ:
+    base = 37, warning ±2, alarm ±5
+    Normal: 35 < value < 39
+    Warning: 32 < value <= 35 hoặc 39 <= value < 42
+    Alarm: value <= 32 hoặc value >= 42
+    """
+
     if value is None:
         return "normal"
 

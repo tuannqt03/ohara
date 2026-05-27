@@ -10,10 +10,13 @@ from settingmachine import (
     get_threshold_for_machine,
     calc_status,
     get_active_alarm_map,
+    get_active_unconfirmed_log,
 )
 
 
 machine_bp = Blueprint("machine", __name__)
+
+ALARM_LOG_COOLDOWN_SECONDS = 15 * 60
 
 
 def get_machine_db():
@@ -57,6 +60,112 @@ def get_machine_name_map():
     }
 
 
+def generate_safe_sensor_values():
+    """
+    Fake data an toàn cho demo:
+    - Mold temp: quanh base 70
+    - Ambient temp: quanh base 35
+    - Humidity: quanh base 58
+    """
+    return (
+        round(random.uniform(66.0, 74.0), 1),
+        round(random.uniform(33.0, 37.0), 1),
+        round(random.uniform(56.0, 60.0), 1),
+    )
+
+
+def generate_safe_outdoor_values():
+    return (
+        round(random.uniform(25.0, 38.0), 1),
+        round(random.uniform(40.0, 70.0), 1),
+    )
+
+
+def status_level(status):
+    if status == "alarm":
+        return 2
+    if status == "warning":
+        return 1
+    return 0
+
+
+def should_create_warning_log(active_log, new_status):
+    if new_status not in ["warning", "alarm"]:
+        return False
+
+    # Nếu chưa có log chưa confirm:
+    # tạo log mới ngay khi dữ liệu hiện tại đang warning/alarm.
+    if not active_log:
+        return True
+
+    old_status = active_log["status"]
+
+    # Nếu đang warning mà dữ liệu chuyển lên alarm thì tạo log alarm mới.
+    if status_level(new_status) > status_level(old_status):
+        return True
+
+    # Nếu đã có warning/alarm chưa confirm rồi thì không spam log.
+    return False
+
+
+def create_warning_log_if_needed(
+    setting_conn,
+    machine,
+    mold_temp,
+    env_temp,
+    humidity,
+    status,
+    occurred_at=None,
+):
+    if status not in ["warning", "alarm"]:
+        return None
+
+    active_log = get_active_unconfirmed_log(setting_conn, machine["id"])
+
+    if not should_create_warning_log(active_log, status):
+        return active_log["id"] if active_log else None
+
+    occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    message = (
+        f"{machine['machine_name']} {status}: "
+        f"mold_temp={mold_temp}, "
+        f"env_temp={env_temp}, "
+        f"humidity={humidity}"
+    )
+
+    cursor = setting_conn.execute("""
+        INSERT INTO warning_alarm_logs (
+            machine_id,
+            mold_temp,
+            env_temp,
+            humidity,
+            status,
+            message,
+            occurred_at,
+            is_confirmed
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0);
+    """, (
+        machine["id"],
+        mold_temp,
+        env_temp,
+        humidity,
+        status,
+        message,
+        occurred_at_text,
+    ))
+
+    setting_conn.commit()
+
+    return cursor.lastrowid
+
+
+def calculate_status_for_reading(setting_conn, machine_id, mold_temp, env_temp, humidity):
+    threshold = get_threshold_for_machine(setting_conn, machine_id)
+    return calc_status(mold_temp, env_temp, humidity, threshold)
+
+
 @machine_bp.route("/api/debug/db", methods=["GET"])
 def debug_db():
     machine_db_path = current_app.config["MACHINE_DB_PATH"]
@@ -98,12 +207,6 @@ def debug_db():
     return jsonify(result)
 
 
-# =========================
-# MACHINES LATEST
-# sensor_readings nằm trong machine.db
-# warning_alarm_logs nằm trong settingmachine.db
-# =========================
-
 @machine_bp.route("/api/machines/latest", methods=["GET"])
 def get_latest_machines():
     with get_machine_db() as machine_conn:
@@ -123,7 +226,6 @@ def get_latest_machines():
                 r.mold_temp,
                 r.env_temp,
                 r.humidity,
-                r.status AS current_status,
                 r.recorded_at
             FROM sensor_readings r
             INNER JOIN (
@@ -137,9 +239,6 @@ def get_latest_machines():
                AND latest.latest_key = r.recorded_at || printf('%010d', r.id)
             ORDER BY r.machine_id ASC;
         """).fetchall()
-
-    with get_setting_machine_db() as setting_conn:
-        active_alarm_map = get_active_alarm_map(setting_conn)
 
     latest_map = {
         row["machine_id"]: row
@@ -164,52 +263,82 @@ def get_latest_machines():
 
         return (now - recorded_at).total_seconds() > disconnect_after_seconds
 
-    for machine in machines:
-        latest = latest_map.get(machine["id"])
-        active_alarm = active_alarm_map.get(machine["id"])
-        disconnected = is_disconnected(latest)
+    with get_setting_machine_db() as setting_conn:
+        for machine in machines:
+            latest = latest_map.get(machine["id"])
+            disconnected = is_disconnected(latest)
 
-        if disconnected:
-            display_status = "disconnected"
-            active_log_id = None
-            need_confirm = False
-        elif active_alarm:
-            display_status = active_alarm["status"]
-            active_log_id = active_alarm["id"]
-            need_confirm = True
-        else:
-            display_status = "normal"
+            calculated_status = "disconnected"
             active_log_id = None
             need_confirm = False
 
-        data.append({
-            "id": machine["id"],
-            "code": machine["machine_code"],
-            "name": machine["machine_name"],
+            if not disconnected:
+                mold_temp = latest["mold_temp"]
+                env_temp = latest["env_temp"]
+                humidity = latest["humidity"]
 
-            "moldTemp": None if disconnected else latest["mold_temp"],
-            "temp": None if disconnected else latest["env_temp"],
-            "hum": None if disconnected else latest["humidity"],
+                calculated_status = calculate_status_for_reading(
+                    setting_conn,
+                    machine["id"],
+                    mold_temp,
+                    env_temp,
+                    humidity,
+                )
 
-            "status": display_status,
-            "currentStatus": "disconnected" if disconnected else (
-                latest["current_status"] if latest else "normal"
-            ),
-            "needConfirm": need_confirm,
-            "activeLogId": active_log_id,
-            "isDisconnected": disconnected,
+                if calculated_status in ["warning", "alarm"]:
+                    create_warning_log_if_needed(
+                        setting_conn=setting_conn,
+                        machine=machine,
+                        mold_temp=mold_temp,
+                        env_temp=env_temp,
+                        humidity=humidity,
+                        status=calculated_status,
+                        occurred_at=latest["recorded_at"],
+                    )
 
-            "recordedAt": latest["recorded_at"] if latest else None,
-        })
+            active_alarm_map = get_active_alarm_map(setting_conn)
+            active_alarm = active_alarm_map.get(machine["id"])
+
+            # Latch logic:
+            # - Nếu có warning/alarm chưa confirm thì giữ nguyên trạng thái đó.
+            # - Dữ liệu nhiệt độ/độ ẩm vẫn cập nhật bình thường.
+            # - Chỉ khi confirm xong thì trạng thái mới được tính lại.
+            # - Nếu confirm xong mà dữ liệu vẫn vượt ngưỡng, lần reload tiếp theo sẽ tạo cảnh báo mới.
+            if disconnected:
+                display_status = "disconnected"
+                active_log_id = None
+                need_confirm = False
+
+            elif active_alarm:
+                display_status = active_alarm["status"]
+                active_log_id = active_alarm["id"]
+                need_confirm = True
+
+            else:
+                display_status = calculated_status
+                active_log_id = None
+                need_confirm = False
+
+            data.append({
+                "id": machine["id"],
+                "code": machine["machine_code"],
+                "name": machine["machine_name"],
+
+                "moldTemp": None if disconnected else latest["mold_temp"],
+                "temp": None if disconnected else latest["env_temp"],
+                "hum": None if disconnected else latest["humidity"],
+
+                "status": display_status,
+                "currentStatus": calculated_status,
+                "needConfirm": need_confirm,
+                "activeLogId": active_log_id,
+                "isDisconnected": disconnected,
+
+                "recordedAt": latest["recorded_at"] if latest else None,
+            })
 
     return jsonify(data)
 
-
-# =========================
-# SENSOR CHART
-# chart_time_settings: settingmachine.db
-# sensor_readings: machine.db
-# =========================
 
 @machine_bp.route("/api/sensor-readings/chart", methods=["GET"])
 def get_chart_data():
@@ -265,13 +394,7 @@ def get_chart_data():
 
                 ROUND(AVG(mold_temp), 1) AS mold_temp,
                 ROUND(AVG(env_temp), 1) AS env_temp,
-                ROUND(AVG(humidity), 1) AS humidity,
-
-                CASE
-                    WHEN MAX(CASE WHEN status = 'alarm' THEN 1 ELSE 0 END) = 1 THEN 'alarm'
-                    WHEN MAX(CASE WHEN status = 'warning' THEN 1 ELSE 0 END) = 1 THEN 'warning'
-                    ELSE 'normal'
-                END AS status
+                ROUND(AVG(humidity), 1) AS humidity
 
             FROM sensor_readings
             WHERE recorded_at >= ?
@@ -312,12 +435,6 @@ def get_chart_data():
     return jsonify(result[-points:])
 
 
-# =========================
-# SENSOR READINGS
-# sensor_readings: machine.db
-# threshold_settings / warning_alarm_logs: settingmachine.db
-# =========================
-
 @machine_bp.route("/api/sensor-readings", methods=["POST"])
 def create_sensor_reading():
     body = request.get_json() or {}
@@ -344,9 +461,13 @@ def create_sensor_reading():
         }), 404
 
     with get_setting_machine_db() as setting_conn:
-        threshold = get_threshold_for_machine(setting_conn, machine_id)
-
-    status = calc_status(mold_temp, env_temp, humidity, threshold)
+        status = calculate_status_for_reading(
+            setting_conn,
+            machine_id,
+            mold_temp,
+            env_temp,
+            humidity,
+        )
 
     with get_machine_db() as machine_conn:
         cursor = machine_conn.execute("""
@@ -354,16 +475,14 @@ def create_sensor_reading():
                 machine_id,
                 mold_temp,
                 env_temp,
-                humidity,
-                status
+                humidity
             )
-            VALUES (?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?);
         """, (
             machine_id,
             mold_temp,
             env_temp,
             humidity,
-            status,
         ))
 
         sensor_id = cursor.lastrowid
@@ -371,35 +490,14 @@ def create_sensor_reading():
 
     if status in ["warning", "alarm"]:
         with get_setting_machine_db() as setting_conn:
-            message = (
-                f"{machine['machine_name']} {status}: "
-                f"mold_temp={mold_temp}, "
-                f"env_temp={env_temp}, "
-                f"humidity={humidity}"
+            create_warning_log_if_needed(
+                setting_conn=setting_conn,
+                machine=machine,
+                mold_temp=mold_temp,
+                env_temp=env_temp,
+                humidity=humidity,
+                status=status,
             )
-
-            setting_conn.execute("""
-                INSERT INTO warning_alarm_logs (
-                    machine_id,
-                    mold_temp,
-                    env_temp,
-                    humidity,
-                    status,
-                    message,
-                    occurred_at,
-                    is_confirmed
-                )
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0);
-            """, (
-                machine_id,
-                mold_temp,
-                env_temp,
-                humidity,
-                status,
-                message,
-            ))
-
-            setting_conn.commit()
 
     return jsonify({
         "message": "Lưu dữ liệu PLC thành công",
@@ -426,62 +524,45 @@ def create_fake_sensor_readings():
         for machine in machines:
             machine_id = machine["id"]
 
-            mold_temp = round(70 + machine_id * 0.25 + random.uniform(-5, 12), 1)
-            env_temp = round(28 + machine_id * 0.08 + random.uniform(-2, 6), 1)
-            humidity = round(55 + machine_id * 0.12 + random.uniform(-5, 12), 1)
+            mold_temp, env_temp, humidity = generate_safe_sensor_values()
 
-            threshold = get_threshold_for_machine(setting_conn, machine_id)
-            status = calc_status(mold_temp, env_temp, humidity, threshold)
+            status = calculate_status_for_reading(
+                setting_conn,
+                machine_id,
+                mold_temp,
+                env_temp,
+                humidity,
+            )
 
             machine_conn.execute("""
                 INSERT INTO sensor_readings (
                     machine_id,
                     mold_temp,
                     env_temp,
-                    humidity,
-                    status
+                    humidity
                 )
-                VALUES (?, ?, ?, ?, ?);
+                VALUES (?, ?, ?, ?);
             """, (
                 machine_id,
                 mold_temp,
                 env_temp,
                 humidity,
-                status,
             ))
 
+            if status == "warning":
+                warning_count += 1
+            elif status == "alarm":
+                alarm_count += 1
+
             if status in ["warning", "alarm"]:
-                if status == "warning":
-                    warning_count += 1
-                elif status == "alarm":
-                    alarm_count += 1
-
-                message = (
-                    f"{machine['machine_name']} {status}: "
-                    f"mold_temp={mold_temp}, "
-                    f"env_temp={env_temp}, "
-                    f"humidity={humidity}"
+                create_warning_log_if_needed(
+                    setting_conn=setting_conn,
+                    machine=machine,
+                    mold_temp=mold_temp,
+                    env_temp=env_temp,
+                    humidity=humidity,
+                    status=status,
                 )
-
-                setting_conn.execute("""
-                    INSERT INTO warning_alarm_logs (
-                        machine_id,
-                        mold_temp,
-                        env_temp,
-                        humidity,
-                        status,
-                        message,
-                        is_confirmed
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, 0);
-                """, (
-                    machine_id,
-                    mold_temp,
-                    env_temp,
-                    humidity,
-                    status,
-                    message,
-                ))
 
             inserted += 1
 
@@ -515,6 +596,8 @@ def create_fake_history():
         """).fetchall()
 
     inserted = 0
+    warning_count = 0
+    alarm_count = 0
     current_time = start_time
 
     with get_machine_db() as machine_conn, get_setting_machine_db() as setting_conn:
@@ -524,60 +607,48 @@ def create_fake_history():
             for machine in machines:
                 machine_id = machine["id"]
 
-                mold_temp = round(70 + machine_id * 0.25 + random.uniform(-5, 12), 1)
-                env_temp = round(28 + machine_id * 0.08 + random.uniform(-2, 6), 1)
-                humidity = round(55 + machine_id * 0.12 + random.uniform(-5, 12), 1)
+                mold_temp, env_temp, humidity = generate_safe_sensor_values()
 
-                threshold = get_threshold_for_machine(setting_conn, machine_id)
-                status = calc_status(mold_temp, env_temp, humidity, threshold)
+                status = calculate_status_for_reading(
+                    setting_conn,
+                    machine_id,
+                    mold_temp,
+                    env_temp,
+                    humidity,
+                )
+
                 machine_conn.execute("""
                     INSERT INTO sensor_readings (
                         machine_id,
                         mold_temp,
                         env_temp,
                         humidity,
-                        status,
                         recorded_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?);
+                    VALUES (?, ?, ?, ?, ?);
                 """, (
                     machine_id,
                     mold_temp,
                     env_temp,
                     humidity,
-                    status,
                     current_time_text,
                 ))
 
-                if status in ["warning", "alarm"]:
-                    message = (
-                        f"{machine['machine_name']} {status}: "
-                        f"mold_temp={mold_temp}, "
-                        f"env_temp={env_temp}, "
-                        f"humidity={humidity}"
-                    )
+                if status == "warning":
+                    warning_count += 1
+                elif status == "alarm":
+                    alarm_count += 1
 
-                    setting_conn.execute("""
-                        INSERT INTO warning_alarm_logs (
-                            machine_id,
-                            mold_temp,
-                            env_temp,
-                            humidity,
-                            status,
-                            message,
-                            occurred_at,
-                            is_confirmed
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 0);
-                    """, (
-                        machine_id,
-                        mold_temp,
-                        env_temp,
-                        humidity,
-                        status,
-                        message,
-                        current_time_text,
-                    ))
+                if status in ["warning", "alarm"]:
+                    create_warning_log_if_needed(
+                        setting_conn=setting_conn,
+                        machine=machine,
+                        mold_temp=mold_temp,
+                        env_temp=env_temp,
+                        humidity=humidity,
+                        status=status,
+                        occurred_at=current_time_text,
+                    )
 
                 inserted += 1
 
@@ -591,13 +662,10 @@ def create_fake_history():
         "minutes": minutes,
         "stepSeconds": step_seconds,
         "inserted": inserted,
+        "warning": warning_count,
+        "alarm": alarm_count,
     })
 
-
-# =========================
-# OUTDOOR WEATHER
-# outdoor_weather_readings nằm trong machine.db
-# =========================
 
 @machine_bp.route("/api/outdoor-weather/latest", methods=["GET"])
 def get_latest_outdoor_weather():

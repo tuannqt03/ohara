@@ -1,4 +1,3 @@
-import math
 import random
 import sqlite3
 import time
@@ -10,37 +9,19 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "database"
 
 MACHINE_DB_PATH = DB_DIR / "machine.db"
-SETTING_MACHINE_DB_PATH = DB_DIR / "settingmachine.db"
 
 PLC_SCAN_INTERVAL_SECONDS = 5
 DB_SAVE_INTERVAL_SECONDS = 10
-ALARM_LOG_COOLDOWN_SECONDS = 15 * 60
 
-# Test máy không có dữ liệu:
 # None = tất cả máy đều có dữ liệu
-# Ví dụ 3 = máy có id = 3 sẽ không được ghi dữ liệu mới
-SIMULATE_NO_DATA_MACHINE_ID = 3
-
-DEFAULT_MACHINE_THRESHOLDS = {
-    "mold_temp_alarm_low": 50,
-    "mold_temp_warning_low": 60,
-    "mold_temp_warning_high": 80,
-    "mold_temp_alarm_high": 90,
-
-    "env_temp_alarm_low": 15,
-    "env_temp_warning_low": 20,
-    "env_temp_warning_high": 32,
-    "env_temp_alarm_high": 35,
-
-    "humidity_alarm_low": 30,
-    "humidity_warning_low": 40,
-    "humidity_warning_high": 62,
-    "humidity_alarm_high": 68,
-}
+# Ví dụ 3 = máy có id = 3 sẽ không được ghi dữ liệu mới để test No Data
+SIMULATE_NO_DATA_MACHINE_ID = None
 
 
 # =========================
-# DB CONNECTIONS
+# DB CONNECTION
+# Chỉ dùng machine.db.
+# File PLC giả lập không đọc settingmachine.db.
 # =========================
 
 def get_machine_db():
@@ -50,127 +31,12 @@ def get_machine_db():
     return conn
 
 
-def get_setting_machine_db():
-    conn = sqlite3.connect(SETTING_MACHINE_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_table_columns(conn, table_name):
+    rows = conn.execute(f"""
+        PRAGMA table_info({table_name});
+    """).fetchall()
 
-
-# =========================
-# THRESHOLD HELPERS
-# =========================
-
-def ensure_machine_threshold_table():
-    with get_setting_machine_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS machine_threshold_settings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                machine_id INTEGER NOT NULL UNIQUE,
-
-                mold_temp_alarm_low REAL NOT NULL DEFAULT 50,
-                mold_temp_warning_low REAL NOT NULL DEFAULT 60,
-                mold_temp_warning_high REAL NOT NULL DEFAULT 80,
-                mold_temp_alarm_high REAL NOT NULL DEFAULT 90,
-
-                env_temp_alarm_low REAL NOT NULL DEFAULT 15,
-                env_temp_warning_low REAL NOT NULL DEFAULT 20,
-                env_temp_warning_high REAL NOT NULL DEFAULT 32,
-                env_temp_alarm_high REAL NOT NULL DEFAULT 35,
-
-                humidity_alarm_low REAL NOT NULL DEFAULT 30,
-                humidity_warning_low REAL NOT NULL DEFAULT 40,
-                humidity_warning_high REAL NOT NULL DEFAULT 62,
-                humidity_alarm_high REAL NOT NULL DEFAULT 68,
-
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        conn.commit()
-
-
-def get_threshold_value(threshold, key):
-    if isinstance(threshold, dict):
-        return threshold[key]
-
-    return threshold[key]
-
-
-def get_threshold_for_machine(conn, machine_id):
-    row = conn.execute("""
-        SELECT *
-        FROM machine_threshold_settings
-        WHERE machine_id = ?
-        LIMIT 1;
-    """, (machine_id,)).fetchone()
-
-    if row:
-        return row
-
-    return DEFAULT_MACHINE_THRESHOLDS
-
-
-def calc_one_value_status(value, alarm_low, warning_low, warning_high, alarm_high):
-    value = float(value)
-
-    alarm_low = float(alarm_low)
-    warning_low = float(warning_low)
-    warning_high = float(warning_high)
-    alarm_high = float(alarm_high)
-
-    if value <= alarm_low or value >= alarm_high:
-        return "alarm"
-
-    if value <= warning_low or value >= warning_high:
-        return "warning"
-
-    return "normal"
-
-
-def calc_status(mold_temp, env_temp, humidity, threshold):
-    mold_status = calc_one_value_status(
-        mold_temp,
-        get_threshold_value(threshold, "mold_temp_alarm_low"),
-        get_threshold_value(threshold, "mold_temp_warning_low"),
-        get_threshold_value(threshold, "mold_temp_warning_high"),
-        get_threshold_value(threshold, "mold_temp_alarm_high"),
-    )
-
-    env_status = calc_one_value_status(
-        env_temp,
-        get_threshold_value(threshold, "env_temp_alarm_low"),
-        get_threshold_value(threshold, "env_temp_warning_low"),
-        get_threshold_value(threshold, "env_temp_warning_high"),
-        get_threshold_value(threshold, "env_temp_alarm_high"),
-    )
-
-    humidity_status = calc_one_value_status(
-        humidity,
-        get_threshold_value(threshold, "humidity_alarm_low"),
-        get_threshold_value(threshold, "humidity_warning_low"),
-        get_threshold_value(threshold, "humidity_warning_high"),
-        get_threshold_value(threshold, "humidity_alarm_high"),
-    )
-
-    if "alarm" in [mold_status, env_status, humidity_status]:
-        return "alarm"
-
-    if "warning" in [mold_status, env_status, humidity_status]:
-        return "warning"
-
-    return "normal"
-
-
-# =========================
-# GENERAL HELPERS
-# =========================
-
-def status_level(status):
-    if status == "alarm":
-        return 2
-    if status == "warning":
-        return 1
-    return 0
+    return {row["name"] for row in rows}
 
 
 def get_active_machines():
@@ -188,122 +54,31 @@ def get_active_machines():
     return machines
 
 
-def get_active_unconfirmed_log(conn, machine_id):
-    return conn.execute("""
-        SELECT *
-        FROM warning_alarm_logs
-        WHERE machine_id = ?
-          AND COALESCE(is_deleted, 0) = 0
-          AND COALESCE(is_confirmed, 0) = 0
-        ORDER BY
-            CASE status
-                WHEN 'alarm' THEN 2
-                WHEN 'warning' THEN 1
-                ELSE 0
-            END DESC,
-            occurred_at DESC,
-            id DESC
-        LIMIT 1;
-    """, (machine_id,)).fetchone()
-
-
-def should_create_log(active_log, new_status, now_dt):
-    if new_status not in ["warning", "alarm"]:
-        return False
-
-    if not active_log:
-        return True
-
-    old_status = active_log["status"]
-
-    if status_level(new_status) > status_level(old_status):
-        return True
-
-    occurred_at = active_log["occurred_at"]
-
-    if occurred_at:
-        try:
-            occurred_dt = datetime.strptime(occurred_at, "%Y-%m-%d %H:%M:%S")
-            elapsed_seconds = (now_dt - occurred_dt).total_seconds()
-
-            if elapsed_seconds >= ALARM_LOG_COOLDOWN_SECONDS:
-                return True
-        except ValueError:
-            return False
-
-    return False
-
-
 # =========================
 # FAKE PLC DATA
 # =========================
 
 def generate_plc_payload(machine_id, tick):
     """
-    Giả lập payload PLC gửi lên.
+    Fake PLC data an toàn nhất có thể theo default setting hiện tại:
 
-    Mục tiêu:
-    - Dữ liệu ổn định kiểu nhà máy.
-    - Mold temp thường 66-73°C.
-    - Ambient temp thường 23-27°C.
-    - Humidity thường 48-56%.
-    - Warning hiếm.
-    - Alarm cực hiếm, gần như không phát sinh trong demo thường.
+    Setting default:
+    - Mold: base 70, warning ±10, alarm ±15
+      Normal: 60 < mold < 80
+
+    - Env: base 35, warning ±4, alarm ±6
+      Normal: 31 < env < 39
+
+    - Humidity: base 58, warning ±3, alarm ±5
+      Normal: 55 < humidity < 61
+
+    Range fake bên dưới cố tình nằm sâu trong vùng normal,
+    tránh sát biên warning để demo ít cảnh báo nhất.
     """
 
-    # Mold temperature: ổn định quanh 68-72°C
-    mold_center = 68.5 + (machine_id % 8) * 0.35
-    mold_wave = math.sin(tick / 24 + machine_id * 0.17) * 1.1
-    mold_noise = random.uniform(-0.25, 0.25)
-    mold_temp = round(mold_center + mold_wave + mold_noise, 1)
-
-    # Ambient temperature: ổn định quanh 23.5-26.5°C
-    env_center = 24.2 + (machine_id % 6) * 0.22
-    env_wave = math.sin(tick / 32 + machine_id * 0.11) * 0.5
-    env_noise = random.uniform(-0.15, 0.2)
-    env_temp = round(env_center + env_wave + env_noise, 1)
-
-    # Humidity: ổn định quanh 49-55%
-    hum_center = 50.5 + (machine_id % 7) * 0.45
-    hum_wave = math.cos(tick / 28 + machine_id * 0.13) * 1.2
-    hum_noise = random.uniform(-0.35, 0.35)
-    humidity = round(hum_center + hum_wave + hum_noise, 1)
-
-    # Warning hiếm:
-    # DB save mỗi 10s. tick tăng mỗi 5s.
-    # tick % 180 ~ khoảng 15 phút mới có 1 lần warning.
-    # Chỉ 1 máy bị warning tại 1 thời điểm.
-    warning_machine_id = (tick // 180) % 24 + 1
-
-    if tick > 0 and tick % 180 == 0 and machine_id == warning_machine_id:
-        fault_type = random.choice(["mold", "env", "hum"])
-
-        if fault_type == "mold":
-            mold_temp = round(random.uniform(80.2, 81.0), 1)
-        elif fault_type == "env":
-            env_temp = round(random.uniform(32.1, 32.5), 1)
-        else:
-            humidity = round(random.uniform(62.2, 63.0), 1)
-
-    # Alarm cực hiếm:
-    # Khoảng hơn 1 tiếng mới có 1 lần, và xác suất chỉ 20%.
-    # Nếu không muốn alarm trong demo thì đổi random.random() < 0.2 thành < 0.
-    alarm_machine_id = (tick // 900) % 24 + 1
-
-    if (
-        tick > 0
-        and tick % 900 == 0
-        and machine_id == alarm_machine_id
-        and random.random() < 0.2
-    ):
-        fault_type = random.choice(["mold", "env", "hum"])
-
-        if fault_type == "mold":
-            mold_temp = round(random.uniform(90.2, 91.0), 1)
-        elif fault_type == "env":
-            env_temp = round(random.uniform(35.2, 36.0), 1)
-        else:
-            humidity = round(random.uniform(68.2, 69.2), 1)
+    mold_temp = round(random.uniform(67.0, 73.0), 1)
+    env_temp = round(random.uniform(34.0, 36.0), 1)
+    humidity = round(random.uniform(57.0, 59.0), 1)
 
     return {
         "machineId": machine_id,
@@ -315,19 +90,12 @@ def generate_plc_payload(machine_id, tick):
 
 def generate_outdoor_payload(tick):
     """
-    Dữ liệu ngoài trời riêng, không liên quan máy.
-    Dao động chậm, giống nhiệt độ/độ ẩm môi trường khu vực.
+    Outdoor chỉ để hiển thị thời tiết ngoài trời.
+    Không liên quan logic warning/alarm của từng máy.
     """
 
-    outdoor_temp = round(
-        29.0 + math.sin(tick / 40) * 1.4 + random.uniform(-0.25, 0.25),
-        1
-    )
-
-    outdoor_humidity = round(
-        58.0 + math.cos(tick / 36) * 3.0 + random.uniform(-0.6, 0.6),
-        1
-    )
+    outdoor_temp = round(random.uniform(28.0, 34.0), 1)
+    outdoor_humidity = round(random.uniform(50.0, 65.0), 1)
 
     return {
         "temp": outdoor_temp,
@@ -335,15 +103,47 @@ def generate_outdoor_payload(tick):
     }
 
 
-# =========================
-# INSERT ROUND
-# sensor_readings + outdoor_weather_readings: machine.db
-# machine_threshold_settings + warning_alarm_logs: settingmachine.db
-# =========================
+def insert_sensor_reading(conn, payload, recorded_at):
+    """
+    Lưu dữ liệu PLC raw vào sensor_readings.
+    DB hiện tại đã bỏ cột status, nên chỉ insert số đo và thời gian.
+    """
+
+    conn.execute("""
+        INSERT INTO sensor_readings (
+            machine_id,
+            mold_temp,
+            env_temp,
+            humidity,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?);
+    """, (
+        payload["machineId"],
+        payload["moldTemp"],
+        payload["temp"],
+        payload["hum"],
+        recorded_at,
+    ))
+
+
+def insert_outdoor_weather(conn, payload, recorded_at):
+    conn.execute("""
+        INSERT INTO outdoor_weather_readings (
+            outdoor_temp,
+            outdoor_humidity,
+            recorded_at
+        )
+        VALUES (?, ?, ?);
+    """, (
+        payload["temp"],
+        payload["hum"],
+        recorded_at,
+    ))
+
 
 def insert_one_round(tick):
-    now_dt = datetime.now()
-    now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     machines = get_active_machines()
 
@@ -353,11 +153,8 @@ def insert_one_round(tick):
 
     inserted = 0
     skipped = 0
-    normal_count = 0
-    warning_count = 0
-    alarm_count = 0
 
-    with get_machine_db() as machine_conn, get_setting_machine_db() as setting_conn:
+    with get_machine_db() as conn:
         for machine in machines:
             machine_id = machine["id"]
 
@@ -371,148 +168,38 @@ def insert_one_round(tick):
 
             payload = generate_plc_payload(machine_id, tick)
 
-            mold_temp = payload["moldTemp"]
-            env_temp = payload["temp"]
-            humidity = payload["hum"]
-
-            threshold = get_threshold_for_machine(setting_conn, machine_id)
-            status = calc_status(mold_temp, env_temp, humidity, threshold)
-
-            machine_conn.execute("""
-                INSERT INTO sensor_readings (
-                    machine_id,
-                    mold_temp,
-                    env_temp,
-                    humidity,
-                    status,
-                    recorded_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?);
-            """, (
-                machine_id,
-                mold_temp,
-                env_temp,
-                humidity,
-                status,
-                now,
-            ))
-
-            if status in ["warning", "alarm"]:
-                active_log = get_active_unconfirmed_log(setting_conn, machine_id)
-
-                if should_create_log(active_log, status, now_dt):
-                    message = (
-                        f"{machine['machine_name']} {status}: "
-                        f"mold_temp={mold_temp}°C, "
-                        f"env_temp={env_temp}°C, "
-                        f"humidity={humidity}%"
-                    )
-
-                    setting_conn.execute("""
-                        INSERT INTO warning_alarm_logs (
-                            machine_id,
-                            mold_temp,
-                            env_temp,
-                            humidity,
-                            status,
-                            message,
-                            occurred_at,
-                            is_confirmed
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 0);
-                    """, (
-                        machine_id,
-                        mold_temp,
-                        env_temp,
-                        humidity,
-                        status,
-                        message,
-                        now,
-                    ))
-
-            if status == "normal":
-                normal_count += 1
-            elif status == "warning":
-                warning_count += 1
-            elif status == "alarm":
-                alarm_count += 1
+            insert_sensor_reading(conn, payload, now)
 
             inserted += 1
 
+            print(
+                f"[{now}] INSERT machine {machine_id} - {machine['machine_name']} | "
+                f"mold={payload['moldTemp']}°C | "
+                f"env={payload['temp']}°C | "
+                f"hum={payload['hum']}%"
+            )
+
         outdoor_payload = generate_outdoor_payload(tick)
 
-        machine_conn.execute("""
-            INSERT INTO outdoor_weather_readings (
-                outdoor_temp,
-                outdoor_humidity,
-                recorded_at
-            )
-            VALUES (?, ?, ?);
-        """, (
-            outdoor_payload["temp"],
-            outdoor_payload["hum"],
-            now,
-        ))
+        insert_outdoor_weather(conn, outdoor_payload, now)
 
-        machine_conn.commit()
-        setting_conn.commit()
+        conn.commit()
 
     print(
-        f"[{now}] DB saved: {inserted} machines | "
+        f"[{now}] DB saved raw PLC data | "
+        f"Inserted: {inserted} machines | "
         f"Skipped: {skipped} | "
-        f"Normal: {normal_count} | "
-        f"Warning: {warning_count} | "
-        f"Alarm: {alarm_count} | "
         f"Outdoor: {outdoor_payload['temp']}°C / {outdoor_payload['hum']}%"
     )
 
 
 # =========================
-# DB CHECK / MIGRATION
+# DB CHECK
 # =========================
-
-def ensure_confirm_columns():
-    with get_setting_machine_db() as conn:
-        columns = conn.execute("""
-            PRAGMA table_info(warning_alarm_logs);
-        """).fetchall()
-
-        column_names = {column["name"] for column in columns}
-
-        if "is_confirmed" not in column_names:
-            conn.execute("""
-                ALTER TABLE warning_alarm_logs
-                ADD COLUMN is_confirmed INTEGER NOT NULL DEFAULT 0;
-            """)
-
-        if "confirmed_at" not in column_names:
-            conn.execute("""
-                ALTER TABLE warning_alarm_logs
-                ADD COLUMN confirmed_at DATETIME;
-            """)
-
-        if "confirmed_by" not in column_names:
-            conn.execute("""
-                ALTER TABLE warning_alarm_logs
-                ADD COLUMN confirmed_by TEXT;
-            """)
-
-        if "is_deleted" not in column_names:
-            conn.execute("""
-                ALTER TABLE warning_alarm_logs
-                ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
-            """)
-
-        conn.commit()
-
 
 def check_database_ready():
     if not MACHINE_DB_PATH.exists():
         print(f"[ERROR] Không tìm thấy machine.db: {MACHINE_DB_PATH}")
-        return False
-
-    if not SETTING_MACHINE_DB_PATH.exists():
-        print(f"[ERROR] Không tìm thấy settingmachine.db: {SETTING_MACHINE_DB_PATH}")
         return False
 
     try:
@@ -523,50 +210,63 @@ def check_database_ready():
                 WHERE is_active = 1;
             """).fetchone()["total"]
 
-            machine_tables = conn.execute("""
+            tables = conn.execute("""
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'table';
             """).fetchall()
 
-            machine_table_names = {row["name"] for row in machine_tables}
+            table_names = {row["name"] for row in tables}
 
-        with get_setting_machine_db() as conn:
-            setting_tables = conn.execute("""
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table';
-            """).fetchall()
+            required_tables = {
+                "machines",
+                "sensor_readings",
+                "outdoor_weather_readings",
+            }
 
-            setting_table_names = {row["name"] for row in setting_tables}
+            missing_tables = required_tables - table_names
 
-        required_machine_tables = {
-            "machines",
-            "sensor_readings",
-            "outdoor_weather_readings",
-        }
+            if machine_count <= 0:
+                print("[ERROR] machine.db không có máy active.")
+                return False
 
-        required_setting_tables = {
-            "chart_time_settings",
-            "warning_alarm_logs",
-        }
+            if missing_tables:
+                print(f"[ERROR] machine.db thiếu bảng: {sorted(missing_tables)}")
+                return False
 
-        missing_machine_tables = required_machine_tables - machine_table_names
-        missing_setting_tables = required_setting_tables - setting_table_names
+            sensor_columns = get_table_columns(conn, "sensor_readings")
+            required_sensor_columns = {
+                "machine_id",
+                "mold_temp",
+                "env_temp",
+                "humidity",
+                "recorded_at",
+            }
 
-        if machine_count <= 0:
-            print("[ERROR] machine.db không có máy active.")
-            return False
+            missing_sensor_columns = required_sensor_columns - sensor_columns
 
-        if missing_machine_tables:
-            print(f"[ERROR] machine.db thiếu bảng: {sorted(missing_machine_tables)}")
-            return False
+            if missing_sensor_columns:
+                print(
+                    "[ERROR] Bảng sensor_readings thiếu cột: "
+                    f"{sorted(missing_sensor_columns)}"
+                )
+                return False
 
-        if missing_setting_tables:
-            print(f"[ERROR] settingmachine.db thiếu bảng: {sorted(missing_setting_tables)}")
-            return False
+            outdoor_columns = get_table_columns(conn, "outdoor_weather_readings")
+            required_outdoor_columns = {
+                "outdoor_temp",
+                "outdoor_humidity",
+                "recorded_at",
+            }
 
-        ensure_machine_threshold_table()
+            missing_outdoor_columns = required_outdoor_columns - outdoor_columns
+
+            if missing_outdoor_columns:
+                print(
+                    "[ERROR] Bảng outdoor_weather_readings thiếu cột: "
+                    f"{sorted(missing_outdoor_columns)}"
+                )
+                return False
 
         return True
 
@@ -584,19 +284,18 @@ def main():
     print(" Temperature & Humidity PLC Simulator")
     print("====================================")
     print(f"Machine DB: {MACHINE_DB_PATH}")
-    print(f"Setting DB: {SETTING_MACHINE_DB_PATH}")
     print(f"PLC scan interval: {PLC_SCAN_INTERVAL_SECONDS} seconds")
     print(f"DB save interval: {DB_SAVE_INTERVAL_SECONDS} seconds")
-    print(f"Alarm log cooldown: {ALARM_LOG_COOLDOWN_SECONDS} seconds")
     print(f"Simulate no data machine id: {SIMULATE_NO_DATA_MACHINE_ID}")
+    print("Mode: raw PLC data only")
+    print("Không đọc settingmachine.db")
+    print("Không tính warning/alarm")
+    print("Không ghi warning_alarm_logs")
     print("Nhấn Ctrl + C để dừng.")
     print("")
 
     if not check_database_ready():
         return
-
-    ensure_confirm_columns()
-    ensure_machine_threshold_table()
 
     tick = 0
     last_save_time = None
