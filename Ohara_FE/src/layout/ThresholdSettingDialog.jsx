@@ -13,18 +13,18 @@ import {
 import CloseIcon from "@mui/icons-material/Close";
 import SaveIcon from "@mui/icons-material/Save";
 
-const defaultSetting = {
-  moldTempBase: 70,
-  moldTempWarningDelta: 10,
-  moldTempAlarmDelta: 15,
+const emptySetting = {
+  moldTempBase: "",
+  moldTempWarningDelta: "",
+  moldTempAlarmDelta: "",
 
-  envTempBase: 35,
-  envTempWarningDelta: 4,
-  envTempAlarmDelta: 6,
+  envTempBase: "",
+  envTempWarningDelta: "",
+  envTempAlarmDelta: "",
 
-  humidityBase: 58,
-  humidityWarningDelta: 3,
-  humidityAlarmDelta: 5,
+  humidityBase: "",
+  humidityWarningDelta: "",
+  humidityAlarmDelta: "",
 };
 
 const thresholdColumns = [
@@ -107,13 +107,13 @@ export default function ThresholdSettingDialog({
   onSave,
 }) {
   const [saving, setSaving] = useState(false);
-  const [draftSetting, setDraftSetting] = useState(defaultSetting);
+  const [draftSetting, setDraftSetting] = useState(emptySetting);
 
   useEffect(() => {
     if (!open) return;
 
     setDraftSetting({
-      ...defaultSetting,
+      ...emptySetting,
       ...(setting || {}),
     });
   }, [open, setting]);
