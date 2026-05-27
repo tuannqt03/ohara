@@ -91,8 +91,16 @@ const getDisplayStatus = (m) => {
     return "disconnected";
   }
 
+  // Quan trọng:
+  // status là trạng thái hiển thị đã được backend xử lý latch.
+  // Nếu có warning/alarm chưa confirm thì status vẫn giữ warning/alarm.
   if (["normal", "warning", "alarm"].includes(m.status)) {
     return m.status;
+  }
+
+  // currentStatus chỉ là trạng thái tính từ giá trị hiện tại.
+  if (["normal", "warning", "alarm"].includes(m.currentStatus)) {
+    return m.currentStatus;
   }
 
   return "normal";

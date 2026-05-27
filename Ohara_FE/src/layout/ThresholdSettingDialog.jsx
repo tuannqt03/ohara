@@ -12,20 +12,19 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import SaveIcon from "@mui/icons-material/Save";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
 
 const defaultSetting = {
   moldTempBase: 70,
-  moldTempWarningDelta: 2,
-  moldTempAlarmDelta: 4,
+  moldTempWarningDelta: 10,
+  moldTempAlarmDelta: 15,
 
-  envTempBase: 25,
-  envTempWarningDelta: 2,
-  envTempAlarmDelta: 4,
+  envTempBase: 35,
+  envTempWarningDelta: 4,
+  envTempAlarmDelta: 6,
 
-  humidityBase: 50,
-  humidityWarningDelta: 5,
-  humidityAlarmDelta: 10,
+  humidityBase: 58,
+  humidityWarningDelta: 3,
+  humidityAlarmDelta: 5,
 };
 
 const thresholdColumns = [
@@ -71,6 +70,32 @@ const thresholdRows = [
 ];
 
 const toNumber = (value) => Number(value);
+
+const formatNumber = (value) => {
+  const num = Number(value);
+
+  if (Number.isNaN(num)) return "--";
+
+  return Number.isInteger(num) ? String(num) : String(Number(num.toFixed(1)));
+};
+
+const getLimitText = ({ base, delta, type, unit }) => {
+  const baseValue = Number(base);
+  const deltaValue = Number(delta);
+
+  if (
+    Number.isNaN(baseValue) ||
+    Number.isNaN(deltaValue) ||
+    deltaValue <= 0
+  ) {
+    return "";
+  }
+
+  const low = baseValue - deltaValue;
+  const high = baseValue + deltaValue;
+
+  return `${type}: ≤ ${formatNumber(low)}${unit} or ≥ ${formatNumber(high)}${unit}`;
+};
 
 export default function ThresholdSettingDialog({
   open,
@@ -157,62 +182,103 @@ export default function ThresholdSettingDialog({
     }));
   };
 
-  const renderNumberInput = ({ keyName, unit }) => (
-    <TextField
-      type="number"
-      size="small"
-      value={draftSetting?.[keyName] ?? ""}
-      disabled={saving}
-      onChange={(e) => handleChangeValue(keyName, e.target.value)}
-      slotProps={{
-        htmlInput: {
-          step: "0.1",
-          style: {
-            height: 34,
-            padding: "0 10px",
-            textAlign: "center",
-            fontFamily,
-            fontSize: 14,
-            fontWeight: 800,
-            color: colors.head,
-          },
-        },
-      }}
-      InputProps={{
-        endAdornment: (
+  const renderNumberInput = ({ keyName, unit, column, row }) => {
+    const isWarningRow = row.keyType === "warningKey";
+    const isAlarmRow = row.keyType === "alarmKey";
+
+    const helperText =
+      isWarningRow || isAlarmRow
+        ? getLimitText({
+            base: draftSetting[column.baseKey],
+            delta: draftSetting[column[row.keyType]],
+            type: isWarningRow ? "Warning" : "Alarm",
+            unit,
+          })
+        : "";
+
+    return (
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          minHeight: helperText ? 56 : 38,
+        }}
+      >
+        <TextField
+          type="number"
+          size="small"
+          value={draftSetting?.[keyName] ?? ""}
+          disabled={saving}
+          onChange={(e) => handleChangeValue(keyName, e.target.value)}
+          slotProps={{
+            htmlInput: {
+              step: "0.1",
+              style: {
+                height: 34,
+                padding: "0 10px",
+                textAlign: "center",
+                fontFamily,
+                fontSize: 14,
+                fontWeight: 800,
+                color: colors.head,
+              },
+            },
+          }}
+          InputProps={{
+            endAdornment: (
+              <Typography
+                sx={{
+                  ml: 0.7,
+                  fontFamily,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  color: colors.subtle,
+                }}
+              >
+                {unit}
+              </Typography>
+            ),
+          }}
+          sx={{
+            width: 112,
+            "& .MuiOutlinedInput-root": {
+              height: 38,
+              borderRadius: 1.4,
+              bgcolor: "#ffffff",
+              "& fieldset": {
+                borderColor: colors.border,
+              },
+              "&:hover fieldset": {
+                borderColor: "#94a3b8",
+              },
+              "&.Mui-focused fieldset": {
+                borderColor: "#3b82f6",
+                borderWidth: 1.5,
+              },
+            },
+          }}
+        />
+
+        {helperText && (
           <Typography
             sx={{
-              ml: 0.7,
+              mt: 0.45,
               fontFamily,
-              fontSize: 11,
+              fontSize: 10.5,
               fontWeight: 800,
-              color: colors.subtle,
+              color: isAlarmRow ? "#b91c1c" : "#b45309",
+              lineHeight: 1.2,
+              textAlign: "center",
+              whiteSpace: "nowrap",
             }}
           >
-            {unit}
+            {helperText}
           </Typography>
-        ),
-      }}
-      sx={{
-        width: 112,
-        "& .MuiOutlinedInput-root": {
-          height: 38,
-          borderRadius: 1.4,
-          bgcolor: "#ffffff",
-          "& fieldset": {
-            borderColor: colors.border,
-          },
-          "&:hover fieldset": {
-            borderColor: "#94a3b8",
-          },
-          "&.Mui-focused fieldset": {
-            borderColor: "#3b82f6",
-            borderWidth: 1.5,
-          },
-        },
-      }}
-    />
-  );
+        )}
+      </Box>
+    );
+  };
 
   return (
     <Dialog
@@ -223,7 +289,7 @@ export default function ThresholdSettingDialog({
       slotProps={{
         paper: {
           sx: {
-            width: 720,
+            width: 760,
             maxWidth: "calc(100vw - 32px)",
             borderRadius: 2.5,
             overflow: "hidden",
@@ -300,7 +366,7 @@ export default function ThresholdSettingDialog({
                 fontFamily,
                 fontSize: 13,
                 fontWeight: 900,
-                color: "#fff",
+                color: colors.subtle,
               }}
             >
               Parameter
@@ -317,7 +383,7 @@ export default function ThresholdSettingDialog({
                   textAlign: "center",
                 }}
               >
-                {column.icon} {column.shortTitle} ({column.unit})
+                {column.shortTitle} ({column.unit})
               </Typography>
             ))}
           </Box>
@@ -329,7 +395,7 @@ export default function ThresholdSettingDialog({
                 display: "grid",
                 gridTemplateColumns: "1.2fr repeat(3, 1fr)",
                 alignItems: "center",
-                minHeight: 68,
+                minHeight: row.keyType === "baseKey" ? 68 : 82,
                 px: 1.5,
                 borderBottom:
                   rowIndex !== thresholdRows.length - 1
@@ -347,19 +413,7 @@ export default function ThresholdSettingDialog({
                     lineHeight: 1.25,
                   }}
                 >
-                  {row.icon} {row.label}
-                </Typography>
-
-                <Typography
-                  sx={{
-                    mt: 0.35,
-                    fontFamily,
-                    fontSize: 11.5,
-                    fontWeight: 700,
-                    color: colors.subtle,
-                  }}
-                >
-                  {row.note}
+                  {row.label}
                 </Typography>
               </Box>
 
@@ -371,12 +425,16 @@ export default function ThresholdSettingDialog({
                   {renderNumberInput({
                     keyName: column[row.keyType],
                     unit: column.unit,
+                    column,
+                    row,
                   })}
                 </Box>
               ))}
             </Box>
           ))}
         </Box>
+
+
       </DialogContent>
 
       <DialogActions
@@ -390,7 +448,6 @@ export default function ThresholdSettingDialog({
           gap: 1.2,
         }}
       >
-
         <Button
           startIcon={<SaveIcon />}
           onClick={handleSave}

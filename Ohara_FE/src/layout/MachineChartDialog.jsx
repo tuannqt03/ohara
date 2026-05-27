@@ -118,6 +118,7 @@ const combineDateAndTimeInput = (dateValue, timeValue) => {
 
   return date;
 };
+
 export default function MachineChartDialog({
   open,
   onClose,
@@ -149,7 +150,12 @@ export default function MachineChartDialog({
   // null = realtime latest window
   // Date = history mode, load 100 chart points ending at this selected datetime
   const [selectedEndTime, setSelectedEndTime] = useState(null);
-
+  const machineNameMap = useMemo(() => {
+    return machines.reduce((acc, machine) => {
+      acc[machine.id] = machine.name;
+      return acc;
+    }, {});
+  }, [machines]);
   const noDataLimitSeconds = Math.max(
     Number(timeRange || 10) * NO_DATA_LIMIT_MULTIPLIER,
     30
@@ -577,6 +583,7 @@ export default function MachineChartDialog({
                   domain={chart.domain}
                   timeRange={timeRange}
                   loading={loading}
+                  machineNameMap={machineNameMap}
                 />
               ))}
             </Box>
@@ -1225,6 +1232,7 @@ function ChartBox({
   domain,
   timeRange,
   loading,
+  machineNameMap,
 }) {
   const xAxisTicks =
     data && data.length > 1 ? [data[0].time, data[data.length - 1].time] : [];
@@ -1402,10 +1410,7 @@ function ChartBox({
                 fontWeight: 700,
                 fontSize: 11,
               }}
-              formatter={(value, name) => [
-                value,
-                String(name).replace("Machine", "Machine"),
-              ]}
+              formatter={(value, name) => [value, name]}
               labelFormatter={(label) =>
                 `Time: ${label} | Interval: ${timeRange}s`
               }
@@ -1416,7 +1421,7 @@ function ChartBox({
                 key={`${dataPrefix}_${id}`}
                 type="monotone"
                 dataKey={`${dataPrefix}_${id}`}
-                name={`Machine ${id}`}
+                name={machineNameMap?.[id] || `Machine ${id}`}
                 dot={false}
                 strokeWidth={2.3}
                 stroke={machineColors[(id - 1) % machineColors.length]}
