@@ -59,50 +59,38 @@ def get_active_machines():
 # =========================
 
 def generate_plc_payload(machine_id, tick):
-    """
-    Fake PLC data an toàn nhất có thể theo default setting hiện tại:
 
-    Setting default:
-    - Mold: base 70, warning ±10, alarm ±15
-      Normal: 60 < mold < 80
+    # Máy 16 -> 24 mất toàn bộ dữ liệu
+    if 16 <= machine_id <= 24:
+        return {
+            "machineId": machine_id,
+            "moldTemp": 0.0,
+            "temp": 0.0,
+            "hum": 0.0,
+        }
 
-    - Env: base 35, warning ±4, alarm ±6
-      Normal: 31 < env < 39
+    # Các máy còn lại:
+    # Mold luôn bằng 0
+    # Chỉ Temp + Humidity có dữ liệu
 
-    - Humidity: base 58, warning ±3, alarm ±5
-      Normal: 55 < humidity < 61
-
-    Range fake bên dưới cố tình nằm sâu trong vùng normal,
-    tránh sát biên warning để demo ít cảnh báo nhất.
-    """
-
-    mold_temp = round(random.uniform(67.0, 73.0), 1)
-    env_temp = round(random.uniform(34.0, 36.0), 1)
-    humidity = round(random.uniform(57.0, 59.0), 1)
+    env_temp = round(random.uniform(27.0, 29.0), 1)
+    humidity = round(random.uniform(38.0, 42.0), 1)
 
     return {
         "machineId": machine_id,
-        "moldTemp": mold_temp,
+        "moldTemp": 0.0,
         "temp": env_temp,
         "hum": humidity,
     }
 
-
 def generate_outdoor_payload(tick):
-    """
-    Outdoor chỉ để hiển thị thời tiết ngoài trời.
-    Không liên quan logic warning/alarm của từng máy.
-    """
 
-    outdoor_temp = round(random.uniform(28.0, 34.0), 1)
-    outdoor_humidity = round(random.uniform(50.0, 65.0), 1)
+    # Outdoor mất dữ liệu hoàn toàn
 
     return {
-        "temp": outdoor_temp,
-        "hum": outdoor_humidity,
+        "temp": 0.0,
+        "hum": 0.0,
     }
-
-
 def insert_sensor_reading(conn, payload, recorded_at):
     """
     Lưu dữ liệu PLC raw vào sensor_readings.

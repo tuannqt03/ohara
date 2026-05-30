@@ -7,25 +7,21 @@ from flask import Blueprint, jsonify, request, current_app
 settingmachine_bp = Blueprint("settingmachine", __name__)
 
 
-# Default demo-safe thresholds:
-# Mold:     base 70, warning 60-80, alarm 55-85
-# Env:      base 35, warning 31-39, alarm 29-41
-# Humidity: base 58, warning 55-61, alarm 53-63
-#
-# IMPORTANT:
-# Sau này muốn đổi default thì chỉ sửa ở đây.
 DEFAULT_MACHINE_THRESHOLDS = {
-    "mold_temp_base": 70,
+    # Mold temp
+    "mold_temp_base": 0,
     "mold_temp_warning_delta": 10,
     "mold_temp_alarm_delta": 15,
 
+    # Temp
     "env_temp_base": 35,
-    "env_temp_warning_delta": 4,
-    "env_temp_alarm_delta": 6,
+    "env_temp_warning_delta": 33,
+    "env_temp_alarm_delta": 34,
 
-    "humidity_base": 58,
-    "humidity_warning_delta": 3,
-    "humidity_alarm_delta": 5,
+    # Humidity
+    "humidity_base": 40,
+    "humidity_warning_delta": 25,
+    "humidity_alarm_delta": 30,
 }
 
 
@@ -114,14 +110,6 @@ def ensure_warning_log_columns():
 
 
 def ensure_machine_threshold_table():
-    """
-    Bảng setting chuẩn:
-    - Không dùng low/high cũ.
-    - Chỉ dùng base + warning_delta + alarm_delta.
-    - Backend tính cảnh báo theo abs(value - base).
-    - Default lấy từ DEFAULT_MACHINE_THRESHOLDS, không hard-code lặp lại.
-    """
-
     with get_setting_machine_db() as conn:
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS machine_threshold_settings (
@@ -186,12 +174,8 @@ def get_threshold_value(threshold, key):
 
 
 def normalize_threshold_row(row):
-    """
-    Đảm bảo nếu DB cũ có giá trị NULL thì fallback về default.
-    """
-
     if not row:
-        return DEFAULT_MACHINE_THRESHOLDS
+        return DEFAULT_MACHINE_THRESHOLDS.copy()
 
     result = {}
 
@@ -219,27 +203,18 @@ def get_threshold_for_machine(conn, machine_id):
     if row:
         return normalize_threshold_row(row)
 
-    return DEFAULT_MACHINE_THRESHOLDS
+    return DEFAULT_MACHINE_THRESHOLDS.copy()
 
 
 def calc_one_value_status(value, base, warning_delta, alarm_delta):
-    """
-    Logic chuẩn:
-    - Normal nếu abs(value - base) < warning_delta
-    - Warning nếu warning_delta <= abs(value - base) < alarm_delta
-    - Alarm nếu abs(value - base) >= alarm_delta
-
-    Ví dụ:
-    base = 37, warning ±2, alarm ±5
-    Normal: 35 < value < 39
-    Warning: 32 < value <= 35 hoặc 39 <= value < 42
-    Alarm: value <= 32 hoặc value >= 42
-    """
-
     if value is None:
-        return "normal"
+        return "nodata"
 
     value = float(value)
+
+    if value <= 0:
+        return "nodata"
+
     base = float(base)
     warning_delta = float(warning_delta)
     alarm_delta = float(alarm_delta)
@@ -253,6 +228,56 @@ def calc_one_value_status(value, base, warning_delta, alarm_delta):
         return "warning"
 
     return "normal"
+
+
+def get_warning_sources(mold_temp, env_temp, humidity, threshold):
+    sources = []
+
+    mold_status = calc_one_value_status(
+        mold_temp,
+        get_threshold_value(threshold, "mold_temp_base"),
+        get_threshold_value(threshold, "mold_temp_warning_delta"),
+        get_threshold_value(threshold, "mold_temp_alarm_delta"),
+    )
+
+    env_status = calc_one_value_status(
+        env_temp,
+        get_threshold_value(threshold, "env_temp_base"),
+        get_threshold_value(threshold, "env_temp_warning_delta"),
+        get_threshold_value(threshold, "env_temp_alarm_delta"),
+    )
+
+    humidity_status = calc_one_value_status(
+        humidity,
+        get_threshold_value(threshold, "humidity_base"),
+        get_threshold_value(threshold, "humidity_warning_delta"),
+        get_threshold_value(threshold, "humidity_alarm_delta"),
+    )
+
+    if mold_status in ["warning", "alarm"]:
+        sources.append("Mold Temp")
+
+    if env_status in ["warning", "alarm"]:
+        sources.append("Temp")
+
+    if humidity_status in ["warning", "alarm"]:
+        sources.append("Humidity")
+
+    return sources
+
+
+def build_warning_message(mold_temp, env_temp, humidity, threshold):
+    sources = get_warning_sources(
+        mold_temp,
+        env_temp,
+        humidity,
+        threshold,
+    )
+
+    if not sources:
+        return ""
+
+    return ", ".join(sources)
 
 
 def calc_status(mold_temp, env_temp, humidity, threshold):
@@ -277,10 +302,23 @@ def calc_status(mold_temp, env_temp, humidity, threshold):
         get_threshold_value(threshold, "humidity_alarm_delta"),
     )
 
-    if "alarm" in [mold_status, env_status, humidity_status]:
+    if (
+        mold_status == "nodata"
+        and env_status == "nodata"
+        and humidity_status == "nodata"
+    ):
+        return "nodata"
+
+    valid_statuses = [
+        status
+        for status in [mold_status, env_status, humidity_status]
+        if status != "nodata"
+    ]
+
+    if "alarm" in valid_statuses:
         return "alarm"
 
-    if "warning" in [mold_status, env_status, humidity_status]:
+    if "warning" in valid_statuses:
         return "warning"
 
     return "normal"
@@ -433,7 +471,7 @@ def update_threshold_setting():
         (
             values["env_temp_warning_delta"],
             values["env_temp_alarm_delta"],
-            "Ambient temperature",
+            "Temperature",
         ),
         (
             values["humidity_warning_delta"],
@@ -537,7 +575,171 @@ def update_threshold_setting():
         "setting": threshold_to_frontend(machine_id, values),
     })
 
+@settingmachine_bp.route("/api/settings/threshold/all", methods=["PUT"])
+def update_all_threshold_settings():
+    body = request.get_json() or {}
 
+    required_fields = [
+        "moldTempBase",
+        "moldTempWarningDelta",
+        "moldTempAlarmDelta",
+
+        "envTempBase",
+        "envTempWarningDelta",
+        "envTempAlarmDelta",
+
+        "humidityBase",
+        "humidityWarningDelta",
+        "humidityAlarmDelta",
+    ]
+
+    missing = [field for field in required_fields if field not in body]
+    if missing:
+        return jsonify({
+            "message": "Missing required data",
+            "missing": missing,
+        }), 400
+
+    values = {
+        "mold_temp_base": float(body["moldTempBase"]),
+        "mold_temp_warning_delta": float(body["moldTempWarningDelta"]),
+        "mold_temp_alarm_delta": float(body["moldTempAlarmDelta"]),
+
+        "env_temp_base": float(body["envTempBase"]),
+        "env_temp_warning_delta": float(body["envTempWarningDelta"]),
+        "env_temp_alarm_delta": float(body["envTempAlarmDelta"]),
+
+        "humidity_base": float(body["humidityBase"]),
+        "humidity_warning_delta": float(body["humidityWarningDelta"]),
+        "humidity_alarm_delta": float(body["humidityAlarmDelta"]),
+    }
+
+    checks = [
+        (
+            values["mold_temp_warning_delta"],
+            values["mold_temp_alarm_delta"],
+            "Mold temperature",
+        ),
+        (
+            values["env_temp_warning_delta"],
+            values["env_temp_alarm_delta"],
+            "Temperature",
+        ),
+        (
+            values["humidity_warning_delta"],
+            values["humidity_alarm_delta"],
+            "Humidity",
+        ),
+    ]
+
+    for warning_delta, alarm_delta, label in checks:
+        if warning_delta <= 0 or alarm_delta <= 0:
+            return jsonify({
+                "message": f"{label}: Warning ± and Alarm ± must be greater than 0."
+            }), 400
+
+        if warning_delta >= alarm_delta:
+            return jsonify({
+                "message": f"{label}: Alarm ± must be greater than Warning ±."
+            }), 400
+
+    ensure_machine_threshold_table()
+
+    from machine import get_machine_db
+
+    with get_machine_db() as machine_conn:
+        machines = machine_conn.execute("""
+            SELECT id
+            FROM machines
+            WHERE is_active = 1
+            ORDER BY id ASC;
+        """).fetchall()
+
+    with get_setting_machine_db() as conn:
+        for machine in machines:
+            machine_id = machine["id"]
+
+            existing = conn.execute("""
+                SELECT id
+                FROM machine_threshold_settings
+                WHERE machine_id = ?
+                LIMIT 1;
+            """, (machine_id,)).fetchone()
+
+            if existing:
+                conn.execute("""
+                    UPDATE machine_threshold_settings
+                    SET
+                        mold_temp_base = ?,
+                        mold_temp_warning_delta = ?,
+                        mold_temp_alarm_delta = ?,
+
+                        env_temp_base = ?,
+                        env_temp_warning_delta = ?,
+                        env_temp_alarm_delta = ?,
+
+                        humidity_base = ?,
+                        humidity_warning_delta = ?,
+                        humidity_alarm_delta = ?,
+
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE machine_id = ?;
+                """, (
+                    values["mold_temp_base"],
+                    values["mold_temp_warning_delta"],
+                    values["mold_temp_alarm_delta"],
+
+                    values["env_temp_base"],
+                    values["env_temp_warning_delta"],
+                    values["env_temp_alarm_delta"],
+
+                    values["humidity_base"],
+                    values["humidity_warning_delta"],
+                    values["humidity_alarm_delta"],
+
+                    machine_id,
+                ))
+            else:
+                conn.execute("""
+                    INSERT INTO machine_threshold_settings (
+                        machine_id,
+
+                        mold_temp_base,
+                        mold_temp_warning_delta,
+                        mold_temp_alarm_delta,
+
+                        env_temp_base,
+                        env_temp_warning_delta,
+                        env_temp_alarm_delta,
+
+                        humidity_base,
+                        humidity_warning_delta,
+                        humidity_alarm_delta
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, (
+                    machine_id,
+
+                    values["mold_temp_base"],
+                    values["mold_temp_warning_delta"],
+                    values["mold_temp_alarm_delta"],
+
+                    values["env_temp_base"],
+                    values["env_temp_warning_delta"],
+                    values["env_temp_alarm_delta"],
+
+                    values["humidity_base"],
+                    values["humidity_warning_delta"],
+                    values["humidity_alarm_delta"],
+                ))
+
+        conn.commit()
+
+    return jsonify({
+        "message": "All machine settings updated successfully",
+        "updated": len(machines),
+        "setting": threshold_to_frontend("all", values),
+    })
 @settingmachine_bp.route("/api/settings/chart-times", methods=["GET"])
 def get_chart_time_settings():
     with get_setting_machine_db() as conn:
@@ -628,7 +830,7 @@ def get_warning_logs():
             "envTemp": row["env_temp"],
             "hum": row["humidity"],
             "status": row["status"],
-            "message": row["message"],
+            "message": row["message"] or "",
             "isConfirmed": bool(row["is_confirmed"]),
             "confirmedAt": row["confirmed_at"],
             "confirmedBy": row["confirmed_by"],

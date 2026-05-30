@@ -11,6 +11,7 @@ from settingmachine import (
     calc_status,
     get_active_alarm_map,
     get_active_unconfirmed_log,
+    build_warning_message,
 )
 
 
@@ -61,12 +62,6 @@ def get_machine_name_map():
 
 
 def generate_safe_sensor_values():
-    """
-    Fake data an toàn cho demo:
-    - Mold temp: quanh base 70
-    - Ambient temp: quanh base 35
-    - Humidity: quanh base 58
-    """
     return (
         round(random.uniform(66.0, 74.0), 1),
         round(random.uniform(33.0, 37.0), 1),
@@ -93,18 +88,14 @@ def should_create_warning_log(active_log, new_status):
     if new_status not in ["warning", "alarm"]:
         return False
 
-    # Nếu chưa có log chưa confirm:
-    # tạo log mới ngay khi dữ liệu hiện tại đang warning/alarm.
     if not active_log:
         return True
 
     old_status = active_log["status"]
 
-    # Nếu đang warning mà dữ liệu chuyển lên alarm thì tạo log alarm mới.
     if status_level(new_status) > status_level(old_status):
         return True
 
-    # Nếu đã có warning/alarm chưa confirm rồi thì không spam log.
     return False
 
 
@@ -127,12 +118,30 @@ def create_warning_log_if_needed(
 
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    message = (
-        f"{machine['machine_name']} {status}: "
-        f"mold_temp={mold_temp}, "
-        f"env_temp={env_temp}, "
-        f"humidity={humidity}"
+    threshold = get_threshold_for_machine(
+        setting_conn,
+        machine["id"],
     )
+
+    warning_parts = []
+
+    sources = build_warning_message(
+        mold_temp,
+        env_temp,
+        humidity,
+        threshold,
+    )
+
+    if "Mold Temp" in sources:
+        warning_parts.append(f"Mold Temp ({mold_temp}°C)")
+
+    if "Temp" in sources:
+        warning_parts.append(f"Temp ({env_temp}°C)")
+
+    if "Humidity" in sources:
+        warning_parts.append(f"Humidity ({humidity}%)")
+
+    message = ", ".join(warning_parts)
 
     cursor = setting_conn.execute("""
         INSERT INTO warning_alarm_logs (
@@ -299,11 +308,6 @@ def get_latest_machines():
             active_alarm_map = get_active_alarm_map(setting_conn)
             active_alarm = active_alarm_map.get(machine["id"])
 
-            # Latch logic:
-            # - Nếu có warning/alarm chưa confirm thì giữ nguyên trạng thái đó.
-            # - Dữ liệu nhiệt độ/độ ẩm vẫn cập nhật bình thường.
-            # - Chỉ khi confirm xong thì trạng thái mới được tính lại.
-            # - Nếu confirm xong mà dữ liệu vẫn vượt ngưỡng, lần reload tiếp theo sẽ tạo cảnh báo mới.
             if disconnected:
                 display_status = "disconnected"
                 active_log_id = None
@@ -345,96 +349,143 @@ def get_chart_data():
     interval = request.args.get("interval", default=10, type=int)
     points = request.args.get("points", default=100, type=int)
 
-    if points <= 0:
-        points = 100
+    allowed_intervals = [10, 30, 60, 300, 600]
 
-    if points > 500:
-        points = 500
-
-    range_seconds = interval * points
-
-    with get_setting_machine_db() as setting_conn:
-        valid_interval = setting_conn.execute("""
-            SELECT 1
-            FROM chart_time_settings
-            WHERE interval_seconds = ?
-              AND is_active = 1
-            LIMIT 1;
-        """, (interval,)).fetchone()
-
-    if not valid_interval:
+    if interval not in allowed_intervals:
         return jsonify({
             "message": "Interval không hợp lệ",
-            "allowed": [10, 30, 60]
+            "allowed": allowed_intervals
         }), 400
 
+    if points <= 0:
+        points = 100
+    if points > 5000:
+        points = 5000
+
+    start_time_text = request.args.get("startTime", default="").strip()
     end_time_text = request.args.get("endTime", default="").strip()
 
-    if end_time_text:
-        try:
-            end_time = datetime.strptime(end_time_text, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return jsonify({
-                "message": "endTime không hợp lệ, định dạng đúng là YYYY-MM-DD HH:mm:ss"
-            }), 400
-    else:
-        end_time = datetime.now()
+    try:
+        end_time = (
+            datetime.strptime(end_time_text, "%Y-%m-%d %H:%M:%S")
+            if end_time_text
+            else datetime.now()
+        )
 
-    start_time = end_time - timedelta(seconds=range_seconds)
+        start_time = (
+            datetime.strptime(start_time_text, "%Y-%m-%d %H:%M:%S")
+            if start_time_text
+            else end_time - timedelta(seconds=interval * points)
+        )
+    except ValueError:
+        return jsonify({
+            "message": "startTime/endTime không hợp lệ, định dạng đúng là YYYY-MM-DD HH:mm:ss"
+        }), 400
+
+    if start_time >= end_time:
+        return jsonify({
+            "message": "startTime phải nhỏ hơn endTime"
+        }), 400
+
+    is_custom_range = bool(start_time_text or end_time_text)
+
+    query_interval = interval
+
+    if is_custom_range:
+        max_chart_points = 1200
+        range_seconds = int((end_time - start_time).total_seconds())
+        expected_points = max(1, range_seconds // interval)
+
+        if expected_points > max_chart_points:
+            multiplier = (expected_points + max_chart_points - 1) // max_chart_points
+            query_interval = interval * multiplier
 
     with get_machine_db() as machine_conn:
+        machines = machine_conn.execute("""
+            SELECT id
+            FROM machines
+            WHERE is_active = 1
+            ORDER BY id ASC;
+        """).fetchall()
+
         rows = machine_conn.execute("""
             SELECT
                 machine_id,
-
                 datetime(
                     (CAST(strftime('%s', recorded_at) AS INTEGER) / ?) * ?,
                     'unixepoch'
                 ) AS time_bucket,
-
                 ROUND(AVG(mold_temp), 1) AS mold_temp,
                 ROUND(AVG(env_temp), 1) AS env_temp,
                 ROUND(AVG(humidity), 1) AS humidity
-
             FROM sensor_readings
             WHERE recorded_at >= ?
               AND recorded_at <= ?
             GROUP BY machine_id, time_bucket
             ORDER BY time_bucket ASC, machine_id ASC;
         """, (
-            interval,
-            interval,
+            query_interval,
+            query_interval,
             start_time.strftime("%Y-%m-%d %H:%M:%S"),
             end_time.strftime("%Y-%m-%d %H:%M:%S"),
         )).fetchall()
 
+    machine_ids = [row["id"] for row in machines]
+
     chart_map = {}
+    current = start_time.replace(microsecond=0)
+
+    current_ts = int(current.timestamp())
+    aligned_ts = (current_ts // query_interval) * query_interval
+    current = datetime.fromtimestamp(aligned_ts)
+
+    while current <= end_time:
+        time_key = current.strftime("%Y-%m-%d %H:%M:%S")
+
+        if query_interval >= 3600:
+            display_time = current.strftime("%d/%m %H:%M")
+        elif is_custom_range:
+            display_time = current.strftime("%d/%m %H:%M:%S")
+        else:
+            display_time = current.strftime("%H:%M:%S")
+
+        chart_map[time_key] = {
+            "time": display_time,
+            "fullTime": time_key,
+            "interval": query_interval,
+        }
+
+        for machine_id in machine_ids:
+            chart_map[time_key][f"moldTemp_{machine_id}"] = 0
+            chart_map[time_key][f"temp_{machine_id}"] = 0
+            chart_map[time_key][f"hum_{machine_id}"] = 0
+
+        current += timedelta(seconds=query_interval)
 
     for row in rows:
         if not row["time_bucket"]:
             continue
 
-        time_text = datetime.strptime(
-            row["time_bucket"],
-            "%Y-%m-%d %H:%M:%S"
-        ).strftime("%H:%M:%S")
+        time_key = row["time_bucket"]
 
-        if time_text not in chart_map:
-            chart_map[time_text] = {
-                "time": time_text
-            }
+        if time_key not in chart_map:
+            continue
 
         machine_id = row["machine_id"]
 
-        chart_map[time_text][f"moldTemp_{machine_id}"] = row["mold_temp"]
-        chart_map[time_text][f"temp_{machine_id}"] = row["env_temp"]
-        chart_map[time_text][f"hum_{machine_id}"] = row["humidity"]
+        chart_map[time_key][f"moldTemp_{machine_id}"] = row["mold_temp"] or 0
+        chart_map[time_key][f"temp_{machine_id}"] = row["env_temp"] or 0
+        chart_map[time_key][f"hum_{machine_id}"] = row["humidity"] or 0
 
     result = list(chart_map.values())
 
+    if not is_custom_range and result:
+        result = result[:-1]
+
+    if is_custom_range:
+        return jsonify(result)
+
     return jsonify(result[-points:])
-
-
 @machine_bp.route("/api/sensor-readings", methods=["POST"])
 def create_sensor_reading():
     body = request.get_json() or {}
