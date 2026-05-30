@@ -82,23 +82,33 @@ const statusStyle = {
     bg: "linear-gradient(90deg,#6b7280,#9ca3af)",
     icon: "⚫",
   },
+  nodata: {
+    label: "No Data",
+    color: "#6b7280",
+    bg: "linear-gradient(90deg,#6b7280,#9ca3af)",
+    icon: "⚫",
+  },
 };
 
 const getDisplayStatus = (m) => {
   if (!m) return "normal";
 
-  if (m.isDisconnected || m.status === "disconnected") {
+  if (
+    m.isDisconnected ||
+    m.status === "disconnected" ||
+    m.status === "nodata"
+  ) {
     return "disconnected";
   }
 
-  // Quan trọng:
-  // status là trạng thái hiển thị đã được backend xử lý latch.
-  // Nếu có warning/alarm chưa confirm thì status vẫn giữ warning/alarm.
   if (["normal", "warning", "alarm"].includes(m.status)) {
     return m.status;
   }
 
-  // currentStatus chỉ là trạng thái tính từ giá trị hiện tại.
+  if (m.currentStatus === "nodata") {
+    return "disconnected";
+  }
+
   if (["normal", "warning", "alarm"].includes(m.currentStatus)) {
     return m.currentStatus;
   }
@@ -114,7 +124,15 @@ const getCardStatusColor = (status) => {
 };
 
 const formatMetric = (value, unit) => {
-  if (value === null || value === undefined || value === "") return `--${unit}`;
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    Number(value) === 0
+  ) {
+    return "--";
+  }
+
   return `${value}${unit}`;
 };
 
@@ -138,7 +156,8 @@ export default function TemperatureHumidityDashboard() {
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [warningLogOpen, setWarningLogOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-
+  const [globalSettingOpen, setGlobalSettingOpen] = useState(false);
+  const [globalMachineSetting, setGlobalMachineSetting] = useState(null);
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
 
   const loadOutdoorWeather = async () => {
@@ -183,7 +202,24 @@ export default function TemperatureHumidityDashboard() {
       setLoading(false);
     }
   };
+  const openGlobalSetting = async () => {
+    try {
+      setGlobalMachineSetting(null);
 
+      const firstMachineId = machineIds[0];
+
+      if (firstMachineId) {
+        const res = await temperatureHumidityApi.getThresholdSetting(firstMachineId);
+        setGlobalMachineSetting(res.data || null);
+      }
+
+      setGlobalSettingOpen(true);
+      setActionMenuOpen(false);
+    } catch (error) {
+      console.error("Failed to load global threshold setting:", error);
+      alert("Unable to load global setting. Please check the API.");
+    }
+  };
   useEffect(() => {
     const loadAllDashboardData = async () => {
       await Promise.all([loadDashboardData(), loadOutdoorWeather()]);
@@ -400,7 +436,12 @@ export default function TemperatureHumidityDashboard() {
                     onClick={openAllChart}
                     color={COLORS.head}
                   />
-
+                  <MenuActionButton
+                    icon={<SettingsIcon />}
+                    label="Setting All"
+                    onClick={openGlobalSetting}
+                    color={COLORS.head}
+                  />
                   <MenuActionButton
                     icon="⚠️"
                     label="History"
@@ -623,7 +664,28 @@ export default function TemperatureHumidityDashboard() {
           await loadDashboardData();
         }}
       />
+      <ThresholdSettingDialog
+        open={globalSettingOpen}
+        onClose={() => {
+          setGlobalSettingOpen(false);
+          setGlobalMachineSetting(null);
+        }}
+        machine={{
+          id: "all",
+          name: "All Machines",
+        }}
+        setting={globalMachineSetting}
+        colors={COLORS}
+        fontFamily={FONT_FAMILY}
+        onSave={async (newSetting) => {
+          await temperatureHumidityApi.updateAllThresholdSettings(newSetting);
 
+          setGlobalSettingOpen(false);
+          setGlobalMachineSetting(null);
+
+          await loadDashboardData();
+        }}
+      />
       <MachineChartDialog
         open={chartOpen}
         onClose={() => setChartOpen(false)}

@@ -26,6 +26,8 @@ export const temperatureHumidityApi = {
   // Lưu setting ngưỡng cảnh báo
   updateThresholdSetting: (data) =>
   api.put("/api/settings/threshold", data),
+  updateAllThresholdSettings: (data) =>
+  api.put("/api/settings/threshold/all", data),
 
   // Lấy danh sách mốc chart 10s / 30s / 60s
   getChartTimeSettings: () => {
@@ -33,11 +35,20 @@ export const temperatureHumidityApi = {
   },
 
   // Lấy dữ liệu chart
-  getChartData: ({ interval = 10, points = 100, endTime = "" } = {}) => {
+  getChartData: ({
+    interval = 10,
+    points = 100,
+    startTime = "",
+    endTime = "",
+  } = {}) => {
     const params = {
       interval,
       points,
     };
+
+    if (startTime) {
+      params.startTime = startTime;
+    }
 
     if (endTime) {
       params.endTime = endTime;

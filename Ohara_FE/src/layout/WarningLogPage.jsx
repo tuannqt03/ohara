@@ -82,7 +82,9 @@ const formatDateTime = (value) => {
     hour12: false,
   });
 };
-
+const getWarningDescription = (item) => {
+  return item.message || "Threshold exceeded";
+};
 export default function WarningLogDialog({
   open,
   onClose,
@@ -107,6 +109,7 @@ export default function WarningLogDialog({
   const [loading, setLoading] = useState(false);
   const [confirmingId, setConfirmingId] = useState(null);
   const [confirmingMachine, setConfirmingMachine] = useState(false);
+  const [confirmingAll, setConfirmingAll] = useState(false);
 
   const resolveInitialDate = async () => {
     const today = getTodayInputDate();
@@ -264,6 +267,33 @@ export default function WarningLogDialog({
     }
   };
 
+  const confirmAllLogs = async () => {
+    const activeLogs = logs.filter((log) => !log.isConfirmed);
+
+    if (activeLogs.length === 0) return;
+
+    try {
+      setConfirmingAll(true);
+
+      await Promise.all(
+        activeLogs.map((log) =>
+          temperatureHumidityApi.confirmWarningLog(log.id, "operator")
+        )
+      );
+
+      await loadLogs();
+
+      if (onConfirmed) {
+        await onConfirmed();
+      }
+    } catch (error) {
+      console.error("Failed to confirm all warning logs:", error);
+      alert("Failed to confirm all warning logs. Please check the API.");
+    } finally {
+      setConfirmingAll(false);
+    }
+  };
+
   const warningCount = useMemo(
     () => logs.filter((x) => x.status === "warning" && !x.isConfirmed).length,
     [logs]
@@ -274,9 +304,13 @@ export default function WarningLogDialog({
     [logs]
   );
 
+  const unconfirmedCount = useMemo(
+    () => logs.filter((x) => !x.isConfirmed).length,
+    [logs]
+  );
 
   const columnTemplate =
-    "70px 230px minmax(160px, 1fr) 170px 210px 130px 130px 150px";
+    "70px 220px minmax(150px, 1fr) minmax(240px, 1.2fr) 150px 180px 120px 120px 150px";
 
   const title = selectedMachine
     ? `WARNING & ALARM LOG - ${selectedMachine.name}`
@@ -357,8 +391,6 @@ export default function WarningLogDialog({
               flexShrink: 0,
             }}
           >
-    
-
             <Chip
               label={`Warning: ${warningCount}`}
               sx={{
@@ -379,6 +411,31 @@ export default function WarningLogDialog({
               }}
             />
 
+            {selectedMachine && (
+              <Button
+                onClick={confirmSelectedMachine}
+                disabled={confirmingMachine || unconfirmedCount === 0}
+                sx={{
+                  height: 32,
+                  px: 1.8,
+                  borderRadius: 99,
+                  textTransform: "none",
+                  bgcolor: COLORS.white,
+                  color: COLORS.teal,
+                  fontWeight: 900,
+                  fontSize: 13,
+                  "&:hover": {
+                    bgcolor: "#e5e7eb",
+                  },
+                  "&.Mui-disabled": {
+                    bgcolor: "#cbd5e1",
+                    color: "#64748b",
+                  },
+                }}
+              >
+                {confirmingMachine ? "Confirming..." : "Confirm Machine"}
+              </Button>
+            )}
             <IconButton
               onClick={onClose}
               sx={{
@@ -466,6 +523,32 @@ export default function WarningLogDialog({
               },
             }}
           />
+          <Box sx={{ flex: 1 }} />
+
+          <Button
+            onClick={confirmAllLogs}
+            disabled={confirmingAll || unconfirmedCount === 0}
+            sx={{
+              height: 40,
+              px: 2.2,
+              borderRadius: 10,
+              textTransform: "none",
+              bgcolor: "#050505",
+              color: COLORS.white,
+              fontWeight: 900,
+              fontSize: 13,
+              ml: "auto",
+              "&:hover": {
+                bgcolor: "#000000",
+              },
+              "&.Mui-disabled": {
+                bgcolor: "#cbd5e1",
+                color: "#64748b",
+              },
+            }}
+          >
+            {confirmingAll ? "Confirming..." : "Confirm All"}
+          </Button>
         </Paper>
 
         <Paper
@@ -503,6 +586,7 @@ export default function WarningLogDialog({
               "No.",
               "Time",
               "Machine Name",
+              "Description",
               "Mold Temp.",
               "Ambient Temp.",
               "Humidity",
@@ -603,6 +687,10 @@ export default function WarningLogDialog({
 
                     <Cell colors={COLORS} bold muted={isConfirmed}>
                       {item.machineName}
+                    </Cell>
+
+                    <Cell colors={COLORS} muted={isConfirmed}>
+                      {getWarningDescription(item)}
                     </Cell>
 
                     <Cell colors={COLORS} bold align="center" muted={isConfirmed}>
