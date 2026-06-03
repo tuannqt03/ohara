@@ -337,7 +337,7 @@ export default function ChartToolbar({
             whiteSpace: "nowrap",
           }}
         >
-          Step:
+          Sample Time:
         </Typography>
 
         <Select
@@ -529,7 +529,7 @@ export default function ChartToolbar({
                   <TextField
                     size="small"
                     type="number"
-                    label="Scale"
+                    label="Step"
                     value={draftAxisSettings[chart.value]?.scale ?? ""}
                     onChange={(e) =>
                       updateDraftAxis(chart.value, "scale", e.target.value)
@@ -1003,9 +1003,14 @@ function axisInputSx(colors, fontFamily) {
       fontWeight: 800,
     },
     "& .MuiInputLabel-root": {
-      fontSize: 9.5,
-      fontWeight: 800,
+      fontSize: 11,
+      fontWeight: 900,
       fontFamily,
+      color: colors.head,
+    },
+
+    "& .MuiInputLabel-root.Mui-focused": {
+      color: colors.head,
     },
   };
 }
