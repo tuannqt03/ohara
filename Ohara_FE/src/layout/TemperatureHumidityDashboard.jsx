@@ -156,10 +156,7 @@ export default function TemperatureHumidityDashboard() {
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [warningLogOpen, setWarningLogOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [globalSettingOpen, setGlobalSettingOpen] = useState(false);
-  const [globalMachineSetting, setGlobalMachineSetting] = useState(null);
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
-
   const loadOutdoorWeather = async () => {
     try {
       const res = await temperatureHumidityApi.getOutdoorWeatherLatest();
@@ -200,24 +197,6 @@ export default function TemperatureHumidityDashboard() {
       console.error("Failed to load machines:", error);
     } finally {
       setLoading(false);
-    }
-  };
-  const openGlobalSetting = async () => {
-    try {
-      setGlobalMachineSetting(null);
-
-      const firstMachineId = machineIds[0];
-
-      if (firstMachineId) {
-        const res = await temperatureHumidityApi.getThresholdSetting(firstMachineId);
-        setGlobalMachineSetting(res.data || null);
-      }
-
-      setGlobalSettingOpen(true);
-      setActionMenuOpen(false);
-    } catch (error) {
-      console.error("Failed to load global threshold setting:", error);
-      alert("Unable to load global setting. Please check the API.");
     }
   };
   useEffect(() => {
@@ -437,12 +416,6 @@ export default function TemperatureHumidityDashboard() {
                     color={COLORS.head}
                   />
                   <MenuActionButton
-                    icon={<SettingsIcon />}
-                    label="Setting All"
-                    onClick={openGlobalSetting}
-                    color={COLORS.head}
-                  />
-                  <MenuActionButton
                     icon="⚠️"
                     label="History"
                     onClick={openWarningLog}
@@ -511,7 +484,7 @@ export default function TemperatureHumidityDashboard() {
           const status = getDisplayStatus(m);
           const s = statusStyle[status] || statusStyle.normal;
           const statusColor = getCardStatusColor(status);
-
+          const machineDisplayName = m.code ? `${m.name}_${m.code}` : m.name;
           return (
             <Paper
               key={m.id}
@@ -592,9 +565,9 @@ export default function TemperatureHumidityDashboard() {
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                   }}
-                  title={m.name}
+                  title={machineDisplayName}
                 >
-                  {m.name}
+                  {machineDisplayName}
                 </Box>
               </Box>
 
@@ -614,7 +587,7 @@ export default function TemperatureHumidityDashboard() {
                 />
 
                 <MetricBox
-                  label="OUT TEMP"
+                  label="TEMP"
                   icon="🌡️"
                   value={formatMetric(m.temp, "°C")}
                 />
@@ -664,28 +637,6 @@ export default function TemperatureHumidityDashboard() {
           await loadDashboardData();
         }}
       />
-      <ThresholdSettingDialog
-        open={globalSettingOpen}
-        onClose={() => {
-          setGlobalSettingOpen(false);
-          setGlobalMachineSetting(null);
-        }}
-        machine={{
-          id: "all",
-          name: "All Machines",
-        }}
-        setting={globalMachineSetting}
-        colors={COLORS}
-        fontFamily={FONT_FAMILY}
-        onSave={async (newSetting) => {
-          await temperatureHumidityApi.updateAllThresholdSettings(newSetting);
-
-          setGlobalSettingOpen(false);
-          setGlobalMachineSetting(null);
-
-          await loadDashboardData();
-        }}
-      />
       <MachineChartDialog
         open={chartOpen}
         onClose={() => setChartOpen(false)}
@@ -709,7 +660,6 @@ export default function TemperatureHumidityDashboard() {
         colors={COLORS}
         fontFamily={FONT_FAMILY}
         selectedMachine={selectedLogMachine}
-        onConfirmed={loadDashboardData}
       />
     </Box>
   );

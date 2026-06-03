@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Box,
   Paper,
@@ -13,7 +13,7 @@ import {
   Divider,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
-
+import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
 export const CHART_OPTIONS = [
   { value: "moldTemp", label: "Mold Temperature", shortLabel: "Mold Temp" },
   { value: "envTemp", label: "Temperature", shortLabel: "Temp" },
@@ -44,6 +44,7 @@ export default function ChartToolbar({
   colors,
   fontFamily,
   visibleCharts,
+  onSettingOpenChange,
   setVisibleCharts,
   timeRange,
   setTimeRange,
@@ -56,21 +57,33 @@ export default function ChartToolbar({
   setChartAxisSettings,
   selectedStartTime,
   onDateTimeRangeChange,
+  onResetTimeRange,
 }) {
   const [settingAnchorEl, setSettingAnchorEl] = useState(null);
   const [openSettingSection, setOpenSettingSection] = useState("time");
 
-  const isAllChecked = visibleCharts.length === CHART_OPTIONS.length;
+  const safeVisibleCharts = Array.isArray(visibleCharts) ? visibleCharts : [];
+  const isAllChecked = safeVisibleCharts.length === CHART_OPTIONS.length;
   const openSetting = Boolean(settingAnchorEl);
+  const openSettingPopover = (event) => {
+    setSettingAnchorEl(event.currentTarget);
+    onSettingOpenChange?.(true, "open");
+  };
 
-  const currentDateTime = selectedEndTime || lastRefreshAt || new Date();
+  const closeSettingPopover = async (action = "close") => {
+    setSettingAnchorEl(null);
+    await onSettingOpenChange?.(false, action);
+  };
+  const currentDateTime = selectedEndTime || lastRefreshAt;
 
   const startDateTime =
-    selectedStartTime ||
-    new Date(
-      currentDateTime.getTime() -
-        Number(timeRange || 10) * CHART_POINTS * 1000
-    );
+  selectedStartTime ||
+  (currentDateTime
+    ? new Date(
+        currentDateTime.getTime() -
+          Number(timeRange || 10) * CHART_POINTS * 1000
+      )
+    : null);
 
   const [draftStartDate, setDraftStartDate] = useState(
     formatDateInput(startDateTime)
@@ -87,24 +100,32 @@ export default function ChartToolbar({
 
   const [draftAxisSettings, setDraftAxisSettings] = useState(chartAxisSettings);
 
-  // Chỉ fill form khi mở popup, tránh bị lastRefreshAt reset liên tục khi user đang chọn giờ
-  useEffect(() => {
-    if (!openSetting) return;
+ useEffect(() => {
+  if (!openSetting) return;
 
-    const nextCurrentDateTime = selectedEndTime || lastRefreshAt || new Date();
+  const hasCustomRange = Boolean(selectedStartTime && selectedEndTime);
+  const nextCurrentDateTime = hasCustomRange ? selectedEndTime : lastRefreshAt;
 
-    const nextStartDateTime =
-      selectedStartTime ||
-      new Date(
+  if (!nextCurrentDateTime) return;
+
+  const nextStartDateTime = hasCustomRange
+    ? selectedStartTime
+    : new Date(
         nextCurrentDateTime.getTime() -
           Number(timeRange || 10) * CHART_POINTS * 1000
       );
 
-    setDraftStartDate(formatDateInput(nextStartDateTime));
-    setDraftStartTime(formatTimeInput(nextStartDateTime));
-    setDraftEndDate(formatDateInput(nextCurrentDateTime));
-    setDraftEndTime(formatTimeInput(nextCurrentDateTime));
-  }, [openSetting]);
+  setDraftStartDate(formatDateInput(nextStartDateTime));
+  setDraftStartTime(formatTimeInput(nextStartDateTime));
+  setDraftEndDate(formatDateInput(nextCurrentDateTime));
+  setDraftEndTime(formatTimeInput(nextCurrentDateTime));
+}, [
+  openSetting,
+  selectedStartTime,
+  selectedEndTime,
+  lastRefreshAt,
+  timeRange,
+]);
 
   useEffect(() => {
     setDraftAxisSettings(chartAxisSettings);
@@ -119,14 +140,16 @@ export default function ChartToolbar({
   };
 
   const handleToggleChart = (value) => {
-    setVisibleCharts((prev) => {
-      if (prev.includes(value)) {
-        return prev.filter((x) => x !== value);
-      }
+  setVisibleCharts((prev) => {
+    const current = Array.isArray(prev) ? prev : [];
 
-      return [...prev, value];
-    });
-  };
+    if (current.includes(value)) {
+      return current.filter((x) => x !== value);
+    }
+
+    return [...current, value];
+  });
+};
 
   const updateDraftAxis = (chartKey, field, value) => {
     setDraftAxisSettings((prev) => ({
@@ -170,34 +193,44 @@ export default function ChartToolbar({
   };
 
   const handleApplySettings = async () => {
-    const isAxisValid = applyAxisSettings();
-    if (!isAxisValid) return;
+  const isAxisValid = applyAxisSettings();
+  if (!isAxisValid) return;
 
-    console.log("CLICK APPLY TOOLBAR", {
-      draftStartDate,
-      draftStartTime,
-      draftEndDate,
-      draftEndTime,
+  console.log("CLICK APPLY TOOLBAR", {
+    draftStartDate,
+    draftStartTime,
+    draftEndDate,
+    draftEndTime,
+  });
+  setSettingAnchorEl(null);
+  onSettingOpenChange?.(false, "apply");
+
+  await new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resolve);
     });
+  });
 
-    await onDateTimeRangeChange(
-      draftStartDate,
-      draftStartTime,
-      draftEndDate,
-      draftEndTime
-    );
-
-    setSettingAnchorEl(null);
+  await onDateTimeRangeChange(
+    draftStartDate,
+    draftStartTime,
+    draftEndDate,
+    draftEndTime
+  );
+};
+  const handleResetTimeRange = async () => {
+    await onResetTimeRange?.();
   };
-
   const selectedChartText =
-    visibleCharts.length === 0
-      ? "No chart selected"
-      : isAllChecked
-      ? "All"
-      : CHART_OPTIONS.filter((item) => visibleCharts.includes(item.value))
-          .map((item) => item.label)
-          .join(", ");
+  safeVisibleCharts.length === 0
+    ? "No chart selected"
+    : isAllChecked
+    ? "All"
+    : CHART_OPTIONS.filter((item) =>
+        safeVisibleCharts.includes(item.value)
+      )
+        .map((item) => item.label)
+        .join(", ");
 
   return (
     <Paper
@@ -233,7 +266,7 @@ export default function ChartToolbar({
         <Select
           multiple
           size="small"
-          value={visibleCharts}
+          value={safeVisibleCharts}
           renderValue={() => selectedChartText}
           sx={selectSx(colors, fontFamily, 280)}
           MenuProps={{
@@ -254,8 +287,8 @@ export default function ChartToolbar({
             <Checkbox
               checked={isAllChecked}
               indeterminate={
-                visibleCharts.length > 0 &&
-                visibleCharts.length < CHART_OPTIONS.length
+                safeVisibleCharts.length > 0 &&
+                safeVisibleCharts.length < CHART_OPTIONS.length
               }
               sx={checkSx(colors)}
             />
@@ -270,7 +303,7 @@ export default function ChartToolbar({
               sx={{ fontFamily, fontSize: 13, fontWeight: 800, gap: 1 }}
             >
               <Checkbox
-                checked={visibleCharts.includes(item.value)}
+                checked={safeVisibleCharts.includes(item.value)}
                 sx={checkSx(colors)}
               />
               {item.label}
@@ -294,6 +327,7 @@ export default function ChartToolbar({
       </Box>
 
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+        
         <Typography
           sx={{
             fontFamily,
@@ -331,7 +365,7 @@ export default function ChartToolbar({
 
       <IconButton
         disabled={loading}
-        onClick={(e) => setSettingAnchorEl(e.currentTarget)}
+        onClick={openSettingPopover}
         sx={{
           width: 38,
           height: 38,
@@ -357,7 +391,7 @@ export default function ChartToolbar({
       <Popover
         open={openSetting}
         anchorEl={settingAnchorEl}
-        onClose={() => setSettingAnchorEl(null)}
+        onClose={() => closeSettingPopover("close")}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
         slotProps={{
@@ -411,10 +445,12 @@ export default function ChartToolbar({
                 gridTemplateColumns: "1fr",
                 gap: 1.25,
                 maxWidth: 420,
+                mt: 1,
                 width: "100%",
                 mx: "auto",
               }}
             >
+
               <RangeInputRow
                 label="From:"
                 dateValue={draftStartDate}
@@ -505,19 +541,42 @@ export default function ChartToolbar({
             </Box>
           )}
 
-          <Button
-            type="button"
-            variant="contained"
-            size="small"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              handleApplySettings();
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 1,
+              mt: 0.25,
             }}
-            sx={applyButtonSx(colors, fontFamily)}
           >
-            Apply
-          </Button>
+            <Button
+              type="button"
+              variant="outlined"
+              size="small"
+              onClick={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                await closeSettingPopover("cancel");
+              }}
+              sx={cancelButtonSx(colors, fontFamily)}
+            >
+              Cancel
+            </Button>
+
+            <Button
+              type="button"
+              variant="contained"
+              size="small"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleApplySettings();
+              }}
+              sx={applyButtonSx(colors, fontFamily)}
+            >
+              Apply
+            </Button>
+          </Box>
         </Box>
       </Popover>
     </Paper>
@@ -539,7 +598,7 @@ function RangeInputRow({
       sx={[
         {
           display: "grid",
-          gridTemplateColumns: "44px 1fr 100px",
+          gridTemplateColumns: "44px 1fr 112px",
           gap: 1.5,
           alignItems: "center",
           width: "100%",
@@ -572,13 +631,266 @@ function RangeInputRow({
         sx={[dateTimeInputSx(colors, fontFamily), { width: "100%" }]}
       />
 
-      <TextField
-        size="small"
-        type="time"
+      <MuiXTimePicker
         value={timeValue}
-        onChange={(e) => setTimeValue(e.target.value)}
-        sx={[dateTimeInputSx(colors, fontFamily), { width: "100%" }]}
+        onChange={setTimeValue}
+        colors={colors}
+        fontFamily={fontFamily}
       />
+    </Box>
+  );
+}
+function MuiXTimePicker({ value, onChange, colors, fontFamily }) {
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [draftHour, setDraftHour] = useState("00");
+  const [draftMinute, setDraftMinute] = useState("00");
+
+  const open = Boolean(anchorEl);
+
+  const splitTime = (timeText) => {
+    const [hour = "00", minute = "00"] = String(timeText || "").split(":");
+
+    return {
+      hour: String(hour).padStart(2, "0").slice(0, 2),
+      minute: String(minute).padStart(2, "0").slice(0, 2),
+    };
+  };
+
+  const openPicker = (event) => {
+    const current = splitTime(value);
+    setDraftHour(current.hour);
+    setDraftMinute(current.minute);
+    setAnchorEl(event.currentTarget);
+  };
+
+  const closePicker = () => {
+    setAnchorEl(null);
+  };
+
+  const acceptPicker = () => {
+    onChange(`${draftHour}:${draftMinute}`);
+    closePicker();
+  };
+
+  const hours = Array.from({ length: 24 }, (_, index) =>
+    String(index).padStart(2, "0")
+  );
+
+  const minutes = Array.from({ length: 60 }, (_, index) =>
+    String(index).padStart(2, "0")
+  );
+
+  return (
+    <>
+      <Box
+        onClick={openPicker}
+        sx={{
+          height: 38,
+          width: "100%",
+          borderRadius: 2,
+          border: `1px solid ${colors.border}`,
+          bgcolor: colors.white,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 0.75,
+          cursor: "pointer",
+          fontFamily,
+          fontSize: 13,
+          fontWeight: 900,
+          color: colors.head,
+          letterSpacing: 0.6,
+          userSelect: "none",
+          "&:hover": {
+            borderColor: colors.head,
+            bgcolor: "#f8fafc",
+          },
+        }}
+      >
+        <Box component="span">{value || "--:--"}</Box>
+        <AccessTimeRoundedIcon
+          sx={{
+            fontSize: 16,
+            color: colors.subtle,
+          }}
+        />
+      </Box>
+
+      <Popover
+        open={open}
+        anchorEl={anchorEl}
+        onClose={closePicker}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            sx: {
+              mt: 0.75,
+              width: 190,
+              borderRadius: 2.5,
+              border: `1px solid ${colors.border}`,
+              boxShadow: "0 12px 30px rgba(15,23,42,0.18)",
+              overflow: "hidden",
+              zIndex: 10000,
+            },
+          },
+        }}
+      >
+        <Box sx={{ p: 1 }}>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 0.8,
+              mb: 0.8,
+            }}
+          >
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 11,
+                fontWeight: 900,
+                color: colors.subtle,
+                textAlign: "center",
+              }}
+            >
+              Hour
+            </Typography>
+
+            <Typography
+              sx={{
+                fontFamily,
+                fontSize: 11,
+                fontWeight: 900,
+                color: colors.subtle,
+                textAlign: "center",
+              }}
+            >
+              Minute
+            </Typography>
+          </Box>
+
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 0.8,
+            }}
+          >
+            <TimeColumn
+              items={hours}
+              value={draftHour}
+              onChange={setDraftHour}
+              colors={colors}
+              fontFamily={fontFamily}
+            />
+
+            <TimeColumn
+              items={minutes}
+              value={draftMinute}
+              onChange={setDraftMinute}
+              colors={colors}
+              fontFamily={fontFamily}
+            />
+          </Box>
+
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 0.8,
+              mt: 1,
+              pt: 1,
+              borderTop: `1px solid ${colors.border}`,
+            }}
+          >
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={closePicker}
+              sx={cancelButtonSx(colors, fontFamily)}
+            >
+              Cancel
+            </Button>
+
+            <Button
+              size="small"
+              variant="contained"
+              onClick={acceptPicker}
+              sx={applyButtonSx(colors, fontFamily)}
+            >
+              OK
+            </Button>
+          </Box>
+        </Box>
+      </Popover>
+    </>
+  );
+}
+
+function TimeColumn({ items, value, onChange, colors, fontFamily }) {
+  const selectedRef = useRef(null);
+
+  useEffect(() => {
+    if (!selectedRef.current) return;
+
+    selectedRef.current.scrollIntoView({
+      block: "center",
+      behavior: "auto",
+    });
+  }, [value]);
+
+  return (
+    <Box
+      sx={{
+        height: 192,
+        overflowY: "auto",
+        borderRadius: 2,
+        border: `1px solid ${colors.border}`,
+        bgcolor: "#f8fafc",
+        p: 0.35,
+
+        "&::-webkit-scrollbar": {
+          width: 5,
+        },
+
+        "&::-webkit-scrollbar-thumb": {
+          backgroundColor: "#cbd5e1",
+          borderRadius: 999,
+        },
+      }}
+    >
+      {items.map((item) => {
+        const selected = item === value;
+
+        return (
+          <Box
+            key={item}
+            ref={selected ? selectedRef : null}
+            onClick={() => onChange(item)}
+            sx={{
+              height: 30,
+              borderRadius: 1.5,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              fontFamily,
+              fontSize: 13,
+              fontWeight: 900,
+              color: selected ? colors.white : colors.head,
+              bgcolor: selected ? colors.head : "transparent",
+              mb: 0.25,
+              userSelect: "none",
+              "&:hover": {
+                bgcolor: selected ? colors.head : "#e5e7eb",
+              },
+            }}
+          >
+            {item}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -697,6 +1009,25 @@ function axisInputSx(colors, fontFamily) {
     },
   };
 }
+function cancelButtonSx(colors, fontFamily) {
+  return {
+    height: 34,
+    borderRadius: 2,
+    fontFamily,
+    fontSize: 12,
+    fontWeight: 900,
+    textTransform: "none",
+    color: colors.head,
+    borderColor: colors.border,
+    bgcolor: colors.white,
+    boxShadow: "none",
+    "&:hover": {
+      borderColor: colors.head,
+      bgcolor: "#f8fafc",
+      boxShadow: "none",
+    },
+  };
+}
 
 function applyButtonSx(colors, fontFamily) {
   return {
@@ -712,6 +1043,31 @@ function applyButtonSx(colors, fontFamily) {
     "&:hover": {
       bgcolor: "#000",
       boxShadow: "none",
+    },
+  };
+}
+function resetButtonSx(colors, fontFamily) {
+  return {
+    height: 34,
+    minWidth: 76,
+    borderRadius: 2,
+    fontFamily,
+    fontSize: 12,
+    fontWeight: 900,
+    textTransform: "none",
+    color: colors.head,
+    borderColor: colors.border,
+    bgcolor: colors.white,
+    boxShadow: "none",
+    "&:hover": {
+      borderColor: colors.head,
+      bgcolor: "#f8fafc",
+      boxShadow: "none",
+    },
+    "&.Mui-disabled": {
+      bgcolor: "#f3f4f6",
+      color: "#9ca3af",
+      borderColor: colors.border,
     },
   };
 }

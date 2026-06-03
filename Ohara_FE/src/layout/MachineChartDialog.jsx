@@ -10,6 +10,7 @@ import {
   Checkbox,
   FormControlLabel,
   IconButton,
+  CircularProgress,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import {
@@ -29,15 +30,92 @@ const DEFAULT_TIME_OPTIONS = [
   { value: 10, label: "10s" },
   { value: 30, label: "30s" },
   { value: 60, label: "60s" },
-  { value: 300, label: "5m" },
-  { value: 600, label: "10m" },
 ];
 
 const DEFAULT_VISIBLE_POINTS = 100;
-const CHART_BUFFER_POINTS = 2000;
-const WHEEL_STEP_POINTS = 100;
-const DRAG_STEP_RATIO = 0.7;
-const NO_DATA_LIMIT_MULTIPLIER = 3;
+const CHART_STORAGE_KEY = "temperatureHumidityChartStateV1";
+
+const DEFAULT_VISIBLE_CHARTS = CHART_OPTIONS.map((item) => item.value);
+
+const DEFAULT_CHART_AXIS_SETTINGS = {
+  moldTemp: {
+    min: 0,
+    max: 120,
+    scale: 20,
+  },
+  envTemp: {
+    min: 0,
+    max: 60,
+    scale: 10,
+  },
+  hum: {
+    min: 0,
+    max: 100,
+    scale: 20,
+  },
+};
+
+const parseSavedDate = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+
+  const date = new Date(Number(value));
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date;
+};
+
+const normalizeAxisSettings = (settings) => {
+  if (!settings || typeof settings !== "object") {
+    return DEFAULT_CHART_AXIS_SETTINGS;
+  }
+
+  return {
+    moldTemp: {
+      ...DEFAULT_CHART_AXIS_SETTINGS.moldTemp,
+      ...(settings.moldTemp || {}),
+    },
+    envTemp: {
+      ...DEFAULT_CHART_AXIS_SETTINGS.envTemp,
+      ...(settings.envTemp || {}),
+    },
+    hum: {
+      ...DEFAULT_CHART_AXIS_SETTINGS.hum,
+      ...(settings.hum || {}),
+    },
+  };
+};
+
+const loadSavedChartState = () => {
+  try {
+    const raw = window.localStorage.getItem(CHART_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw);
+
+    const visibleCharts = Array.isArray(parsed.visibleCharts)
+      ? parsed.visibleCharts.filter((value) =>
+          CHART_OPTIONS.some((item) => item.value === value)
+        )
+      : null;
+
+    const selectedStartTime = parseSavedDate(parsed.selectedStartTime);
+    const selectedEndTime = parseSavedDate(parsed.selectedEndTime);
+    const hasValidRange =
+      selectedStartTime && selectedEndTime && selectedStartTime < selectedEndTime;
+
+    return {
+      visibleCharts:
+        visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+      timeRange: Number(parsed.timeRange) || null,
+      selectedStartTime: hasValidRange ? selectedStartTime : null,
+      selectedEndTime: hasValidRange ? selectedEndTime : null,
+      chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
+    };
+  } catch (error) {
+    console.warn("Failed to load saved chart state:", error);
+    return {};
+  }
+};
 
 const parseDbDateTime = (value) => {
   if (!value) return null;
@@ -59,6 +137,22 @@ const combineDateAndTimeInput = (dateValue, timeValue) => {
   return date;
 };
 
+const formatApiDateTime = (date) => {
+  if (!date) return "";
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds()
+  )}`;
+};
+const getMachineDisplayName = (machine) => {
+  if (!machine) return "";
+
+  return machine.code ? `${machine.name}_${machine.code}` : machine.name;
+};
 export default function MachineChartDialog({
   open,
   onClose,
@@ -72,76 +166,80 @@ export default function MachineChartDialog({
   colors,
   fontFamily,
 }) {
-  const [visibleCharts, setVisibleCharts] = useState([
-    "moldTemp",
-    "envTemp",
-    "hum",
-  ]);
+  const savedChartState = useMemo(() => loadSavedChartState(), []);
 
-  const [timeRange, setTimeRange] = useState(10);
+  const [visibleCharts, setVisibleCharts] = useState(
+    Array.isArray(savedChartState.visibleCharts)
+      ? savedChartState.visibleCharts
+      : DEFAULT_VISIBLE_CHARTS
+  );
+
+  const [timeRange, setTimeRange] = useState(savedChartState.timeRange || 10);
   const [timeOptions, setTimeOptions] = useState(DEFAULT_TIME_OPTIONS);
+
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [chartInitialized, setChartInitialized] = useState(false);
-  const [yZoomRange, setYZoomRange] = useState(null);
+
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [latestMachineMap, setLatestMachineMap] = useState({});
 
-  // null = realtime latest window
-  // Date = history mode / custom range mode
-  const [selectedEndTime, setSelectedEndTime] = useState(null);
-  const [selectedStartTime, setSelectedStartTime] = useState(null);
-  const [zoomRange, setZoomRange] = useState(null);
-  const [dragState, setDragState] = useState(null);
+  const [selectedStartTime, setSelectedStartTime] = useState(
+    savedChartState.selectedStartTime || null
+  );
+  const [selectedEndTime, setSelectedEndTime] = useState(
+    savedChartState.selectedEndTime || null
+  );
 
-  const [chartAxisSettings, setChartAxisSettings] = useState({
-    moldTemp: {
-      min: 0,
-      max: 120,
-      scale: 20,
-    },
-    envTemp: {
-      min: 0,
-      max: 60,
-      scale: 10,
-    },
-    hum: {
-      min: 0,
-      max: 100,
-      scale: 20,
-    },
-  });
+  const [realtimeMode, setRealtimeMode] = useState(
+    !(savedChartState.selectedStartTime && savedChartState.selectedEndTime)
+  );
+  const [settingOpen, setSettingOpen] = useState(false);
+  const [xAxisDomain, setXAxisDomain] = useState(null);
+  const [yZoomRange, setYZoomRange] = useState(null);
+  
+
+  const [chartAxisSettings, setChartAxisSettings] = useState(
+    savedChartState.chartAxisSettings || DEFAULT_CHART_AXIS_SETTINGS
+  );
 
   const machineNameMap = useMemo(() => {
     return machines.reduce((acc, machine) => {
-      acc[machine.id] = machine.name;
+      acc[machine.id] = getMachineDisplayName(machine);
       return acc;
     }, {});
   }, [machines]);
 
-  const noDataLimitSeconds = Math.max(
-    Number(timeRange || 10) * NO_DATA_LIMIT_MULTIPLIER,
-    30
-  );
+  const noDataLimitSeconds = Number(timeRange || 10) * 2;
+  const isCustomTimeRange = Boolean(selectedStartTime && selectedEndTime);
 
-  const getWindowMs = useCallback(
-    (interval = timeRange) => {
-      return Number(interval || 10) * DEFAULT_VISIBLE_POINTS * 1000;
-    },
-    [timeRange]
-  );
+  useEffect(() => {
+    if (!open) return;
 
-  const formatApiDateTime = (date) => {
-    if (!date) return "";
-
-    const pad = (n) => String(n).padStart(2, "0");
-
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-      date.getDate()
-    )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
-      date.getSeconds()
-    )}`;
-  };
+    try {
+      window.localStorage.setItem(
+        CHART_STORAGE_KEY,
+        JSON.stringify({
+          visibleCharts,
+          timeRange,
+          selectedStartTime: selectedStartTime
+            ? selectedStartTime.getTime()
+            : null,
+          selectedEndTime: selectedEndTime ? selectedEndTime.getTime() : null,
+          chartAxisSettings,
+        })
+      );
+    } catch (error) {
+      console.warn("Failed to save chart state:", error);
+    }
+  }, [
+    open,
+    visibleCharts,
+    timeRange,
+    selectedStartTime,
+    selectedEndTime,
+    chartAxisSettings,
+  ]);
 
   const loadLatestMachines = useCallback(async () => {
     try {
@@ -168,7 +266,8 @@ export default function MachineChartDialog({
       interval,
       showLoading = true,
       startTimeValue = selectedStartTime,
-      endTimeValue = selectedEndTime
+      endTimeValue = selectedEndTime,
+      fitDataDomain = false
     ) => {
       try {
         if (showLoading) {
@@ -177,59 +276,98 @@ export default function MachineChartDialog({
 
         const startTime = startTimeValue ? new Date(startTimeValue) : null;
         const endTime = endTimeValue ? new Date(endTimeValue) : null;
-        const isCustomRange = Boolean(startTime || endTime);
+        const isManualTimeWindow = Boolean(startTime && endTime);
 
         const [chartRes] = await Promise.all([
           temperatureHumidityApi.getChartData({
             interval,
-            points: CHART_BUFFER_POINTS,
-            ...(startTime ? { startTime: formatApiDateTime(startTime) } : {}),
-            ...(endTime ? { endTime: formatApiDateTime(endTime) } : {}),
+            ...(isManualTimeWindow
+              ? {
+                  startTime: formatApiDateTime(startTime),
+                  endTime: formatApiDateTime(endTime),
+                }
+              : {
+                  points: DEFAULT_VISIBLE_POINTS,
+                }),
           }),
           loadLatestMachines(),
         ]);
 
-        const nextHistory = Array.isArray(chartRes.data) ? chartRes.data : [];
-        setHistory(nextHistory);
+        const rawChartData = Array.isArray(chartRes.data) ? chartRes.data : [];
 
-        if (showLoading) {
-          const total = nextHistory.length;
+        const mappedHistory = rawChartData
+          .map((row) => {
+            const date = parseDbDateTime(row.fullTime || row.realFullTime);
 
-          if (isCustomRange) {
-            // Chọn From/To thì hiển thị toàn bộ khoảng đã chọn
-            setZoomRange({
-              startIndex: 0,
-              endIndex: Math.max(0, total - 1),
-            });
-          } else {
-            // Realtime/manual thường thì chỉ hiện 100 điểm cuối
-            const visibleCount = Math.min(DEFAULT_VISIBLE_POINTS, total);
+            return {
+              ...row,
+              xTs: date ? date.getTime() : null,
+            };
+          })
+          .filter((row) => row.xTs !== null)
+          .sort((a, b) => a.xTs - b.xTs);
 
-            setZoomRange(
-              total > visibleCount
-                ? {
-                    startIndex: total - visibleCount,
-                    endIndex: total - 1,
-                  }
-                : {
-                    startIndex: 0,
-                    endIndex: Math.max(0, total - 1),
-                  }
-            );
-          }
+        const latestDbDate =
+          mappedHistory.length > 0
+            ? new Date(mappedHistory[mappedHistory.length - 1].xTs)
+            : null;
 
-          setYZoomRange(null);
+        let domainStartMs;
+        let domainEndMs;
+
+        if (isManualTimeWindow) {
+          // Khi Apply Start/End: giữ đúng khoảng user chọn
+          domainStartMs = startTime.getTime();
+          domainEndMs = endTime.getTime();
+        } else {
+          // Realtime: lấy mốc dữ liệu mới nhất trong DB rồi lùi 100 step
+          const domainEndTime = latestDbDate || new Date();
+
+          domainEndMs = domainEndTime.getTime();
+          domainStartMs =
+            domainEndMs - Number(interval || 10) * DEFAULT_VISIBLE_POINTS * 1000;
         }
 
-        setLastRefreshAt(endTime || new Date());
+        const nextHistory = mappedHistory.filter(
+          (row) => row.xTs >= domainStartMs && row.xTs <= domainEndMs
+        );
+
+        let finalStartMs = domainStartMs;
+        let finalEndMs = domainEndMs;
+
+        // Với realtime / nút lùi / nút tiến: cho trục X bám sát điểm dữ liệu thật
+        // để line không bị hở một đoạn so với trục Y.
+        if (!isManualTimeWindow && nextHistory.length > 0) {
+          finalStartMs = nextHistory[0].xTs;
+          finalEndMs = nextHistory[nextHistory.length - 1].xTs;
+        }
+
+        // Với nút lùi/tiến vẫn ép sát dữ liệu thật như cũ.
+        if (fitDataDomain && nextHistory.length > 0) {
+          finalStartMs = nextHistory[0].xTs;
+          finalEndMs = nextHistory[nextHistory.length - 1].xTs;
+        }
+
+        setHistory(nextHistory);
+        setXAxisDomain([finalStartMs, finalEndMs]);
+
+      if (showLoading) {
+        setYZoomRange(null);
+      }
+
+      setLastRefreshAt(new Date(finalEndMs));
       } catch (error) {
         console.error("Failed to load chart data:", error);
         setHistory([]);
-        setZoomRange({
-          startIndex: 0,
-          endIndex: 0,
-        });
-        setLastRefreshAt(endTimeValue ? new Date(endTimeValue) : new Date());
+
+        const fallbackEnd = endTimeValue ? new Date(endTimeValue) : new Date();
+        const fallbackStart = new Date(
+          fallbackEnd.getTime() -
+            Number(interval || 10) * DEFAULT_VISIBLE_POINTS * 1000
+        );
+
+        setXAxisDomain([fallbackStart.getTime(), fallbackEnd.getTime()]);
+        setLastRefreshAt(fallbackEnd);
       } finally {
         if (showLoading) {
           setLoading(false);
@@ -245,11 +383,9 @@ export default function MachineChartDialog({
       setHistory([]);
       setLastRefreshAt(null);
       setLatestMachineMap({});
-      setSelectedEndTime(null);
-      setSelectedStartTime(null);
-      setZoomRange(null);
+      setSettingOpen(false);
+      setXAxisDomain(null);
       setYZoomRange(null);
-      setDragState(null);
       return;
     }
 
@@ -295,12 +431,31 @@ export default function MachineChartDialog({
           }
         }
 
+        if (savedChartState.timeRange) {
+          nextTimeRange = savedChartState.timeRange;
+        }
+
+        const savedStartTime = savedChartState.selectedStartTime;
+        const savedEndTime = savedChartState.selectedEndTime;
+        const hasSavedCustomRange =
+          savedStartTime && savedEndTime && savedStartTime < savedEndTime;
+
         setTimeOptions(nextTimeOptions);
         setTimeRange(nextTimeRange);
-        setSelectedEndTime(null);
-        setSelectedStartTime(null);
 
-        await loadChartData(nextTimeRange, true, null, null);
+        if (hasSavedCustomRange) {
+          setSelectedStartTime(savedStartTime);
+          setSelectedEndTime(savedEndTime);
+          setRealtimeMode(false);
+
+          await loadChartData(nextTimeRange, true, savedStartTime, savedEndTime);
+        } else {
+          setSelectedStartTime(null);
+          setSelectedEndTime(null);
+          setRealtimeMode(true);
+
+          await loadChartData(nextTimeRange, true, null, null);
+        }
 
         setChartInitialized(true);
       } catch (error) {
@@ -316,10 +471,20 @@ export default function MachineChartDialog({
     };
 
     initChart();
-  }, [open, chartInitialized, loadChartData]);
+  }, [open, chartInitialized, loadChartData, savedChartState]);
 
   useEffect(() => {
-    if (!open || !chartInitialized || selectedEndTime) return;
+    // Chỉ auto update khi đang realtime 100 điểm.
+    // Khi đã chọn Time Range thủ công thì chart đứng yên.
+    if (
+      !open ||
+      !chartInitialized ||
+      !realtimeMode ||
+      settingOpen ||
+      isCustomTimeRange
+    ) {
+      return;
+    }
 
     const reloadMs = Math.max(Number(timeRange || 10), 5) * 1000;
 
@@ -330,8 +495,15 @@ export default function MachineChartDialog({
     return () => {
       window.clearInterval(timer);
     };
-  }, [open, chartInitialized, timeRange, selectedEndTime, loadChartData]);
-
+  }, [
+    open,
+    chartInitialized,
+    timeRange,
+    realtimeMode,
+    settingOpen,
+    isCustomTimeRange,
+    loadChartData,
+  ]);
   const disconnectedMachineIds = useMemo(() => {
     if (!lastRefreshAt) return [];
 
@@ -352,155 +524,68 @@ export default function MachineChartDialog({
 
       const diffSeconds = (nowTime - recordedDate.getTime()) / 1000;
 
-      return diffSeconds > noDataLimitSeconds;
+      return diffSeconds >= noDataLimitSeconds;
     });
   }, [selectedMachines, latestMachineMap, lastRefreshAt, noDataLimitSeconds]);
 
-  const filteredHistory = useMemo(() => {
+  const visibleHistory = useMemo(() => {
     return Array.isArray(history) ? history : [];
   }, [history]);
 
-  const visibleHistory = useMemo(() => {
-    if (!zoomRange || filteredHistory.length === 0) {
-      return filteredHistory;
-    }
+  const shiftTimeWindow = useCallback(
+    async (direction) => {
+      if (!xAxisDomain || xAxisDomain.length !== 2 || loading) return;
 
-    const start = Math.max(0, zoomRange.startIndex);
-    const end = Math.min(filteredHistory.length - 1, zoomRange.endIndex);
+      const [currentStartMs, currentEndMs] = xAxisDomain;
+      const windowMs = currentEndMs - currentStartMs;
 
-    return filteredHistory.slice(start, end + 1);
-  }, [filteredHistory, zoomRange]);
+      if (windowMs <= 0) return;
 
-  const shiftZoomWindow = useCallback(
-    (direction) => {
-      if (!filteredHistory || filteredHistory.length === 0) return;
+      const moveMs = Number(timeRange || 10) * DEFAULT_VISIBLE_POINTS * 1000;
 
-      const total = filteredHistory.length;
-      const currentStart = zoomRange?.startIndex ?? Math.max(0, total - DEFAULT_VISIBLE_POINTS);
-      const currentEnd = zoomRange?.endIndex ?? total - 1;
-      const size = currentEnd - currentStart + 1;
+      let nextStartMs = currentStartMs;
+      let nextEndMs = currentEndMs;
 
-      const move = WHEEL_STEP_POINTS;
-      let nextStart =
-        direction === "back" ? currentStart - move : currentStart + move;
+      if (direction === "back") {
+        nextStartMs = currentStartMs - moveMs;
+        nextEndMs = currentEndMs - moveMs;
 
-      nextStart = Math.max(0, Math.min(total - size, nextStart));
+        const nextStart = new Date(nextStartMs);
+        const nextEnd = new Date(nextEndMs);
 
-      setZoomRange({
-        startIndex: nextStart,
-        endIndex: nextStart + size - 1,
-      });
-    },
-    [filteredHistory, zoomRange]
-  );
+        setRealtimeMode(false);
+        setSelectedStartTime(nextStart);
+        setSelectedEndTime(nextEnd);
 
-  const handleChartDragStart = useCallback(
-    (event) => {
-      if (!filteredHistory || filteredHistory.length === 0) return;
-
-      const chartKey = event.currentTarget.dataset.chartKey;
-      const setting = chartAxisSettings[chartKey];
-
-      const baseMin = Number(setting?.min ?? 0);
-      const baseMax = Number(setting?.max ?? 100);
-
-      setDragState({
-        startClientX: event.clientX,
-        startClientY: event.clientY,
-        startZoomRange:
-          zoomRange ||
-          {
-            startIndex: Math.max(0, filteredHistory.length - DEFAULT_VISIBLE_POINTS),
-            endIndex: Math.max(0, filteredHistory.length - 1),
-          },
-        chartKey,
-        startYRange:
-          yZoomRange?.[chartKey] || {
-            min: baseMin,
-            max: baseMax,
-          },
-      });
-    },
-    [filteredHistory, zoomRange, yZoomRange, chartAxisSettings]
-  );
-
-  const handleChartDragMove = useCallback(
-    (event) => {
-      if (!dragState || !filteredHistory || filteredHistory.length === 0) return;
-
-      if (event.buttons !== 1) {
-        setDragState(null);
+        await loadChartData(timeRange, true, nextStart, nextEnd, true);
         return;
       }
 
-      const total = filteredHistory.length;
-      const size =
-        dragState.startZoomRange.endIndex - dragState.startZoomRange.startIndex + 1;
+      nextStartMs = currentStartMs + moveMs;
+      nextEndMs = currentEndMs + moveMs;
 
-      const rect = event.currentTarget.getBoundingClientRect();
-      const deltaX = event.clientX - dragState.startClientX;
-      const deltaY = event.clientY - dragState.startClientY;
+      const nowMs = Date.now();
 
-      // Kéo ngang: pan time.
-      const pointsPerPixel = size / Math.max(1, rect.width);
-      const pointShift = Math.round(-deltaX * pointsPerPixel);
+      if (nextEndMs >= nowMs) {
+        setRealtimeMode(true);
+        setSelectedStartTime(null);
+        setSelectedEndTime(null);
 
-      let nextStart = dragState.startZoomRange.startIndex + pointShift;
-      nextStart = Math.max(0, Math.min(total - size, nextStart));
-
-      setZoomRange({
-        startIndex: nextStart,
-        endIndex: nextStart + size - 1,
-      });
-
-      // Kéo dọc: pan Y trong phạm vi Min/Max setting.
-      const setting = chartAxisSettings[dragState.chartKey];
-      const baseMin = Number(setting?.min ?? 0);
-      const baseMax = Number(setting?.max ?? 100);
-
-      const startY = dragState.startYRange;
-      const yWindow = startY.max - startY.min;
-      const baseRange = baseMax - baseMin;
-
-      if (
-        Number.isFinite(baseMin) &&
-        Number.isFinite(baseMax) &&
-        baseRange > 0 &&
-        yWindow > 0 &&
-        yWindow < baseRange
-      ) {
-        const valuePerPixel = yWindow / Math.max(1, rect.height);
-        const yShift = deltaY * valuePerPixel * DRAG_STEP_RATIO;
-
-        let nextMin = startY.min + yShift;
-        let nextMax = startY.max + yShift;
-
-        if (nextMin < baseMin) {
-          nextMin = baseMin;
-          nextMax = baseMin + yWindow;
-        }
-
-        if (nextMax > baseMax) {
-          nextMax = baseMax;
-          nextMin = baseMax - yWindow;
-        }
-
-        setYZoomRange((prev) => ({
-          ...prev,
-          [dragState.chartKey]: {
-            min: Number(nextMin.toFixed(2)),
-            max: Number(nextMax.toFixed(2)),
-          },
-        }));
+        await loadChartData(timeRange, true, null, null);
+        return;
       }
+
+      const nextStart = new Date(nextStartMs);
+      const nextEnd = new Date(nextEndMs);
+
+      setRealtimeMode(false);
+      setSelectedStartTime(nextStart);
+      setSelectedEndTime(nextEnd);
+
+      await loadChartData(timeRange, true, nextStart, nextEnd, true);
     },
-    [dragState, filteredHistory, chartAxisSettings]
+    [xAxisDomain, loading, timeRange, loadChartData]
   );
-
-  const handleChartDragEnd = useCallback(() => {
-    setDragState(null);
-  }, []);
-
   const charts = useMemo(() => {
     const allCharts = [
       {
@@ -521,7 +606,7 @@ export default function MachineChartDialog({
     ];
 
     return allCharts
-      .filter((item) => visibleCharts.includes(item.key))
+      .filter((item) => Array.isArray(visibleCharts) && visibleCharts.includes(item.key))
       .map((item) => ({
         ...item,
         axisSetting: chartAxisSettings[item.key],
@@ -538,43 +623,87 @@ export default function MachineChartDialog({
       : "1fr";
 
   const handleDateTimeRangeChange = useCallback(
-  async (startDateValue, startTimeValue, endDateValue, endTimeValue) => {
-    const nextStartTime = combineDateAndTimeInput(startDateValue, startTimeValue);
-    const nextEndTime = combineDateAndTimeInput(endDateValue, endTimeValue);
+    async (startDateValue, startTimeValue, endDateValue, endTimeValue) => {
+      const nextStartTime = combineDateAndTimeInput(
+        startDateValue,
+        startTimeValue
+      );
+      const nextEndTime = combineDateAndTimeInput(endDateValue, endTimeValue);
 
-    console.log("APPLY RANGE:", {
-      startDateValue,
-      startTimeValue,
-      endDateValue,
-      endTimeValue,
-      nextStartTime,
-      nextEndTime,
-    });
+      if (!nextStartTime || !nextEndTime) {
+        alert("Vui lòng chọn đủ ngày giờ bắt đầu và kết thúc");
+        return;
+      }
 
-    if (!nextStartTime || !nextEndTime) {
-      alert("Vui lòng chọn đủ ngày giờ bắt đầu và kết thúc");
-      return;
-    }
+      if (nextStartTime >= nextEndTime) {
+        alert("Thời gian bắt đầu phải nhỏ hơn thời gian kết thúc");
+        return;
+      }
 
-    if (nextStartTime >= nextEndTime) {
-      alert("Thời gian bắt đầu phải nhỏ hơn thời gian kết thúc");
-      return;
-    }
+      setRealtimeMode(false);
+      setSelectedStartTime(nextStartTime);
+      setSelectedEndTime(nextEndTime);
 
-    setSelectedStartTime(nextStartTime);
-    setSelectedEndTime(nextEndTime);
+      await loadChartData(timeRange, true, nextStartTime, nextEndTime);
+    },
+    [loadChartData, timeRange]
+  );
 
-    await loadChartData(timeRange, true, nextStartTime, nextEndTime);
+  const title =
+  chartMode === "single"
+    ? `CHART ${
+        getMachineDisplayName(
+          machines.find((m) => m.id === selectedMachines[0])
+        ) || ""
+      }`
+    : "CHART TEMPERATURE & HUMIDITY";
+  const handleSettingOpenChange = useCallback(
+    async (isOpen, action) => {
+      setSettingOpen(isOpen);
+
+      if (isOpen) {
+        setRealtimeMode(false);
+        return;
+      }
+
+      if (action === "apply") {
+        return;
+      }
+
+      if (selectedStartTime && selectedEndTime) {
+        setRealtimeMode(false);
+
+        await loadChartData(
+          timeRange,
+          true,
+          selectedStartTime,
+          selectedEndTime
+        );
+
+        return;
+      }
+
+      setRealtimeMode(true);
+      setSelectedStartTime(null);
+      setSelectedEndTime(null);
+
+      await loadChartData(timeRange, true, null, null);
+    },
+    [loadChartData, timeRange, selectedStartTime, selectedEndTime]
+  );
+
+  const resetToRealtime = useCallback(
+  async (nextTimeRange = timeRange) => {
+    setRealtimeMode(true);
+    setSelectedStartTime(null);
+    setSelectedEndTime(null);
+    setXAxisDomain(null);
+    setYZoomRange(null);
+
+    await loadChartData(nextTimeRange, true, null, null);
   },
   [loadChartData, timeRange]
 );
-
-  const title =
-    chartMode === "single"
-      ? `CHART ${
-          machines.find((m) => m.id === selectedMachines[0])?.name || ""
-        }`
-      : "CHART TEMPERATURE & HUMIDITY";
 
   return (
     <Dialog
@@ -625,6 +754,7 @@ export default function MachineChartDialog({
           p: 2,
           height: "calc(100vh - 64px)",
           overflow: "hidden",
+          position: "relative",
         }}
       >
         <Box
@@ -657,26 +787,37 @@ export default function MachineChartDialog({
             <ChartToolbar
               colors={colors}
               fontFamily={fontFamily}
+              onSettingOpenChange={handleSettingOpenChange}
               visibleCharts={visibleCharts}
               setVisibleCharts={setVisibleCharts}
               chartAxisSettings={chartAxisSettings}
               setChartAxisSettings={setChartAxisSettings}
               selectedStartTime={selectedStartTime}
+              selectedEndTime={selectedEndTime}
               onDateTimeRangeChange={handleDateTimeRangeChange}
               timeRange={timeRange}
               setTimeRange={setTimeRange}
+              onResetTimeRange={() => resetToRealtime()}
               onTimeRangeChange={async (nextTimeRange) => {
                 setTimeRange(nextTimeRange);
-                await loadChartData(
-                  nextTimeRange,
-                  true,
-                  selectedStartTime,
-                  selectedEndTime
-                );
+
+                if (selectedStartTime && selectedEndTime) {
+                  setRealtimeMode(false);
+
+                  await loadChartData(
+                    nextTimeRange,
+                    true,
+                    selectedStartTime,
+                    selectedEndTime
+                  );
+
+                  return;
+                }
+
+                await resetToRealtime(nextTimeRange);
               }}
               timeOptions={timeOptions}
               loading={loading}
-              selectedEndTime={selectedEndTime}
               lastRefreshAt={lastRefreshAt}
             />
 
@@ -716,6 +857,7 @@ export default function MachineChartDialog({
                   No chart selected
                 </Paper>
               )}
+
               {charts.map((chart, index) => {
                 const showNavButtons = index === charts.length - 1;
 
@@ -724,9 +866,10 @@ export default function MachineChartDialog({
                     key={chart.key}
                     title={chart.title}
                     data={visibleHistory}
+                    xAxisDomain={xAxisDomain}
+                    isManualTimeWindow={Boolean(selectedStartTime && selectedEndTime)}
                     selectedMachines={selectedMachines}
                     disconnectedMachineIds={disconnectedMachineIds}
-                    noDataLimitSeconds={noDataLimitSeconds}
                     dataPrefix={chart.dataPrefix}
                     machineColors={machineColors}
                     colors={colors}
@@ -735,16 +878,13 @@ export default function MachineChartDialog({
                     timeRange={timeRange}
                     loading={loading}
                     machineNameMap={machineNameMap}
-                    isDragging={Boolean(dragState)}
-                    onDragStart={handleChartDragStart}
-                    onDragMove={handleChartDragMove}
-                    onDragEnd={handleChartDragEnd}
                     yZoomRange={yZoomRange?.[chart.key]}
-                    onBack={showNavButtons ? () => shiftZoomWindow("back") : undefined}
-                    onNext={showNavButtons ? () => shiftZoomWindow("next") : undefined}
-                    navDisabled={
-                      !showNavButtons || loading || filteredHistory.length === 0
+                    onBack={showNavButtons ? () => shiftTimeWindow("back") : undefined}
+                    onNext={showNavButtons ? () => shiftTimeWindow("next") : undefined}
+                    onReset={
+                      showNavButtons ? () => resetToRealtime() : undefined
                     }
+                    navDisabled={!showNavButtons || loading || !xAxisDomain}
                     showNavButtons={showNavButtons}
                   />
                 );
@@ -765,6 +905,65 @@ export default function MachineChartDialog({
             />
           )}
         </Box>
+
+        {loading && (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 9999,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              bgcolor: "rgba(15, 23, 42, 0.18)",
+              pointerEvents: "auto",
+            }}
+          >
+            <Paper
+              elevation={0}
+              sx={{
+                px: 3,
+                py: 2,
+                borderRadius: 2.5,
+                minWidth: 260,
+                display: "flex",
+                alignItems: "center",
+                gap: 2,
+                bgcolor: colors.white,
+                border: `1px solid ${colors.border}`,
+                boxShadow: "0 8px 24px rgba(15,23,42,0.12)",
+              }}
+            >
+              <CircularProgress size={22} thickness={5} />
+
+              <Box>
+                <Typography
+                  sx={{
+                    fontFamily,
+                    fontSize: 14,
+                    fontWeight: 800,
+                    color: colors.head,
+                    lineHeight: 1.2,
+                  }}
+                >
+                  Loading...
+                </Typography>
+
+                <Typography
+                  sx={{
+                    fontFamily,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: colors.subtle,
+                    mt: 0.25,
+                  }}
+                >
+                  Please wait while loading chart data
+                </Typography>
+              </Box>
+            </Paper>
+          </Box>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -866,7 +1065,6 @@ function MachineSelectPanel({
           overflowX: "hidden",
           p: 2,
           pt: 1.25,
-
           "&::-webkit-scrollbar": {
             width: 8,
           },
@@ -883,45 +1081,49 @@ function MachineSelectPanel({
           },
         }}
       >
-        {machines.map((m) => (
-          <FormControlLabel
-            key={m.id}
-            sx={{
-              width: "100%",
-              m: 0,
-              py: 0.35,
-              alignItems: "center",
-              "& .MuiFormControlLabel-label": {
-                fontSize: 14.5,
+        {machines.map((m) => {
+          const machineDisplayName = getMachineDisplayName(m);
+
+          return (
+            <FormControlLabel
+              key={m.id}
+              sx={{
+                width: "100%",
+                m: 0,
+                py: 0.35,
+                alignItems: "center",
+                "& .MuiFormControlLabel-label": {
+                  fontSize: 14.5,
                 fontWeight: 700,
-                minWidth: 0,
-              },
-            }}
-            control={
-              <Checkbox
-                checked={selectedMachines.includes(m.id)}
-                onChange={() => toggleMachine(m.id)}
-                sx={{
-                  color: colors.head,
-                  "&.Mui-checked": { color: colors.head },
-                }}
-              />
-            }
-            label={
-              <Box
-                component="span"
-                sx={{
-                  color: machineColors[(m.id - 1) % machineColors.length],
-                  fontWeight: 700,
-                  whiteSpace: "nowrap",
-                }}
-                title={m.name}
-              >
-                {m.name}
-              </Box>
-            }
-          />
-        ))}
+                  minWidth: 0,
+                },
+              }}
+              control={
+                <Checkbox
+                  checked={selectedMachines.includes(m.id)}
+                  onChange={() => toggleMachine(m.id)}
+                  sx={{
+                    color: colors.head,
+                    "&.Mui-checked": { color: colors.head },
+                  }}
+                />
+              }
+              label={
+                <Box
+                  component="span"
+                  sx={{
+                    color: machineColors[(m.id - 1) % machineColors.length],
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                  }}
+                  title={machineDisplayName}
+                >
+                  {machineDisplayName}
+                </Box>
+              }
+            />
+          );
+        })}
       </Box>
     </Paper>
   );
@@ -930,7 +1132,9 @@ function MachineSelectPanel({
 function ChartBox({
   title,
   data,
+  xAxisDomain,
   selectedMachines,
+  isManualTimeWindow,
   disconnectedMachineIds,
   dataPrefix,
   machineColors,
@@ -940,18 +1144,77 @@ function ChartBox({
   timeRange,
   loading,
   machineNameMap,
-  onDragStart,
-  onDragMove,
-  onDragEnd,
   yZoomRange,
   onBack,
   onNext,
+  onReset,
   navDisabled,
   showNavButtons,
-  isDragging,
 }) {
-  const xAxisTicks =
-    data && data.length > 1 ? [data[0].time, data[data.length - 1].time] : [];
+  const formatDateKey = useCallback((date) => {
+  if (!date || Number.isNaN(date.getTime())) return "";
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}`;
+}, []);
+
+const shouldShowDateOnXAxis = useMemo(() => {
+  if (!isManualTimeWindow || !xAxisDomain || xAxisDomain.length !== 2) {
+    return false;
+  }
+
+  const startDate = new Date(xAxisDomain[0]);
+  const endDate = new Date(xAxisDomain[1]);
+
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime())
+  ) {
+    return false;
+  }
+
+  return formatDateKey(startDate) !== formatDateKey(endDate);
+}, [isManualTimeWindow, xAxisDomain, formatDateKey]);
+
+const formatChartTime = useCallback(
+  (value) => {
+    if (!value) return "";
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+
+    const pad = (n) => String(n).padStart(2, "0");
+
+    const timeText = `${pad(date.getHours())}:${pad(
+      date.getMinutes()
+    )}:${pad(date.getSeconds())}`;
+
+    if (!shouldShowDateOnXAxis) {
+      return timeText;
+    }
+
+    const dateText = `${pad(date.getDate())}/${pad(
+      date.getMonth() + 1
+    )}/${date.getFullYear()}`;
+
+    return `${dateText} | ${timeText}`;
+  },
+  [shouldShowDateOnXAxis]
+);
+
+  const visualXAxisDomain = useMemo(() => {
+    return xAxisDomain;
+  }, [xAxisDomain]);
+  const xAxisTicks = useMemo(() => {
+    if (visualXAxisDomain?.length === 2) {
+      return visualXAxisDomain;
+    }
+
+    return [];
+  }, [visualXAxisDomain]);
 
   const yAxisTicks = useMemo(() => {
     const min = Number(axisSetting?.min ?? 0);
@@ -967,6 +1230,7 @@ function ChartBox({
     }
 
     const ticks = [];
+
     for (let value = min; value <= max; value += scale) {
       ticks.push(Number(value.toFixed(6)));
     }
@@ -987,25 +1251,14 @@ function ChartBox({
       return [yZoomRange.min, yZoomRange.max];
     }
 
-    return [
-      Number(axisSetting?.min ?? 0),
-      Number(axisSetting?.max ?? 100),
-    ];
+    return [Number(axisSetting?.min ?? 0), Number(axisSetting?.max ?? 100)];
   }, [axisSetting, yZoomRange]);
 
   const disconnectedCount = disconnectedMachineIds?.length || 0;
 
-  const isAllSelectedDisconnected =
-    selectedMachines.length > 0 &&
-    selectedMachines.every((id) => disconnectedMachineIds.includes(id));
-
   return (
     <Paper
       elevation={0}
-      onMouseDown={onDragStart}
-      onMouseMove={onDragMove}
-      onMouseUp={onDragEnd}
-      onMouseLeave={onDragEnd}
       data-chart-key={
         dataPrefix === "moldTemp"
           ? "moldTemp"
@@ -1025,8 +1278,45 @@ function ChartBox({
         overflow: "hidden",
         boxShadow: "0 3px 10px rgba(15,23,42,0.06)",
         position: "relative",
-        cursor: isDragging ? "grabbing" : "grab",
-        userSelect: "none",
+        cursor: "default",
+        outline: "none !important",
+
+        "&:focus, &:focus-visible, &:active": {
+          outline: "none !important",
+          boxShadow: "0 3px 10px rgba(15,23,42,0.06)",
+        },
+
+        "& *": {
+          outline: "none !important",
+        },
+
+        "& *:focus, & *:focus-visible, & *:active": {
+          outline: "none !important",
+        },
+
+        "& .recharts-wrapper": {
+          outline: "none !important",
+        },
+
+        "& .recharts-wrapper:focus, & .recharts-wrapper:focus-visible": {
+          outline: "none !important",
+        },
+
+        "& .recharts-surface": {
+          outline: "none !important",
+        },
+
+        "& .recharts-surface:focus, & .recharts-surface:focus-visible": {
+          outline: "none !important",
+        },
+
+        "& svg": {
+          outline: "none !important",
+        },
+
+        "& svg:focus, & svg:focus-visible, & svg:active": {
+          outline: "none !important",
+        },
       }}
     >
       <Typography
@@ -1085,29 +1375,10 @@ function ChartBox({
         </Typography>
       )}
 
-      {isAllSelectedDisconnected && !loading && data.length > 0 && (
-        <Typography
-          sx={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#991b1b",
-            fontSize: 13,
-            fontWeight: 800,
-            pointerEvents: "none",
-            zIndex: 1,
-            textAlign: "center",
-            px: 2,
-          }}
-        >
-          Selected machines have no new data. Please check the PLC / gateway
-          connection.
-        </Typography>
-      )}
+    
+
       {showNavButtons && (
-        <>
+        <Box sx={chartNavGroupSx}>
           <Button
             disabled={navDisabled}
             onClick={(e) => {
@@ -1115,9 +1386,21 @@ function ChartBox({
               onBack?.();
             }}
             onMouseDown={(e) => e.stopPropagation()}
-            sx={chartSideNavButtonSx(colors, fontFamily, "left")}
+            sx={chartNavButtonSx(colors, fontFamily)}
           >
             {"<"}
+          </Button>
+
+          <Button
+            disabled={loading}
+            onClick={(e) => {
+              e.stopPropagation();
+              onReset?.();
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            sx={chartResetButtonSx(colors, fontFamily)}
+          >
+            Reset
           </Button>
 
           <Button
@@ -1127,16 +1410,17 @@ function ChartBox({
               onNext?.();
             }}
             onMouseDown={(e) => e.stopPropagation()}
-            sx={chartSideNavButtonSx(colors, fontFamily, "right")}
+            sx={chartNavButtonSx(colors, fontFamily)}
           >
             {">"}
           </Button>
-        </>
+        </Box>
       )}
+
       <Box
         sx={{
           width: "100%",
-          height: "calc(100% - 19px)",
+          height: "calc(100% - 22px)",
           minWidth: 0,
           minHeight: 0,
         }}
@@ -1144,29 +1428,51 @@ function ChartBox({
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
             data={data}
+            tabIndex={-1}
             margin={{
               top: 2,
               right: 20,
-              left: -10,
-              bottom: 1,
+              left: -5,
+              bottom: 12,
             }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
 
             <XAxis
-              dataKey="time"
+              dataKey="xTs"
+              type="number"
+              scale="time"
+              domain={visualXAxisDomain || ["dataMin", "dataMax"]}
+              padding={{ left: 0, right: 0 }}
               ticks={xAxisTicks}
               interval={0}
-              padding={{ left: 0, right: 0 }}
-              tickMargin={2}
-              height={22}
-              tick={{
-                fontSize: 10,
-                fontWeight: 800,
-                fill: colors.head,
-                fontFamily,
+              tickFormatter={formatChartTime}
+              stroke="none"
+              allowDataOverflow
+              tick={(props) => {
+                const { x, y, payload, index } = props;
+
+                const isFirst = index === 0;
+                const isLast =
+                  xAxisTicks.length > 1 && index === xAxisTicks.length - 1;
+
+                return (
+                  <g transform={`translate(${x},${y})`}>
+                    <text
+                      x={isFirst ? -18 : 0}
+                      dy={16}
+                      textAnchor={isFirst ? "start" : isLast ? "end" : "middle"}
+                      fill={colors.head}
+                      fontSize={10}
+                      fontWeight={800}
+                      fontFamily={fontFamily}
+                    >
+                      {formatChartTime(payload.value)}
+                    </text>
+                  </g>
+                );
               }}
-            axisLine={false}
+              axisLine={false}
               tickLine={false}
             />
 
@@ -1176,17 +1482,23 @@ function ChartBox({
               ticks={yZoomRange ? undefined : yAxisTicks}
               allowDataOverflow
               tickMargin={2}
+              stroke="none"
               tick={{
                 fontSize: 10,
                 fontWeight: 800,
                 fill: colors.head,
                 fontFamily,
               }}
-            axisLine={false}
+              axisLine={false}
               tickLine={false}
             />
 
             <Tooltip
+              cursor={{
+                stroke: "#64748b",
+                strokeWidth: 1,
+                strokeDasharray: "3 3",
+              }}
               contentStyle={{
                 borderRadius: 10,
                 border: `1px solid ${colors.border}`,
@@ -1209,13 +1521,14 @@ function ChartBox({
               }}
               formatter={(value, name) => [value, name]}
               labelFormatter={(label, payload) => {
-                const currentInterval = payload?.[0]?.payload?.interval || timeRange;
-                const intervalText =
-                  currentInterval >= 60
-                    ? `${Math.round(currentInterval / 60)}m`
-                    : `${currentInterval}s`;
+                const row = payload?.[0]?.payload;
+                const realTime = row?.realFullTime || row?.fullTime;
 
-                return `Time: ${label} | Interval: ${intervalText}`;
+                if (realTime) {
+                  return `Time: ${String(realTime).replace(" ", " | ")}`;
+                }
+
+                return `Time: ${formatChartTime(label)}`;
               }}
             />
 
@@ -1228,7 +1541,11 @@ function ChartBox({
                 dot={false}
                 strokeWidth={2.3}
                 stroke={machineColors[(id - 1) % machineColors.length]}
-                activeDot={{ r: 4, strokeWidth: 1.5 }}
+                activeDot={{
+                  r: 4,
+                  fill: machineColors[(id - 1) % machineColors.length],
+                  stroke: "none",
+                }}
                 isAnimationActive={false}
                 connectNulls={false}
               />
@@ -1239,33 +1556,71 @@ function ChartBox({
     </Paper>
   );
 }
+const chartNavGroupSx = {
+  position: "absolute",
+  bottom: 10,
+  left: "50%",
+  transform: "translateX(-50%)",
+  zIndex: 20,
+  display: "flex",
+  alignItems: "center",
+  gap: 0.5,
+  px: 0.5,
+  py: 0.4,
+  boxShadow: "0 2px 8px rgba(15,23,42,0.12)",
+};
 
-function chartSideNavButtonSx(colors, fontFamily, side) {
+function chartNavButtonSx(colors, fontFamily) {
   return {
-    position: "absolute",
-    bottom: 40,
-    [side]: side === "left" ? 55 : 40,
-    zIndex: 20,
     minWidth: 25,
     height: 25,
-    px: 0.75,
+    px: 0,
+    pt:1,
+    borderRadius: 1.4,
+    fontFamily,
+    fontSize: 12,
+    fontWeight: 900,
+    lineHeight: 1,
+    textTransform: "none",
+    color: colors.head,
+    bgcolor: colors.white,
+    border: `1px solid ${colors.border}`,
+    boxShadow: "none",
+    "&:hover": {
+      bgcolor: "#38bdf8",
+      color: "#000",
+      borderColor: "#0284c7",
+      boxShadow: "none",
+    },
+    "&.Mui-disabled": {
+      bgcolor: "rgba(241,245,249,0.9)",
+      color: "#94a3b8",
+      borderColor: colors.border,
+    },
+  };
+}
+
+function chartResetButtonSx(colors, fontFamily) {
+  return {
+    minWidth: 54,
+    height: 25,
+    px: 1,
     py: 0,
-    
-    borderRadius: 1.5,
+    borderRadius: 1.4,
     fontFamily,
     fontSize: 11,
     fontWeight: 900,
     lineHeight: 1,
     textTransform: "none",
     color: colors.head,
-    bgcolor: "rgba(255,255,255,0.92)",
+    bgcolor: colors.white,
     border: `1px solid ${colors.border}`,
-    boxShadow: "0 2px 6px rgba(15,23,42,0.12)",
+    boxShadow: "none",
     "&:hover": {
-      bgcolor: "#38bdf8",
-      color: "#000",
-      borderColor: "#0284c7",
-      boxShadow: "0 3px 8px rgba(15,23,42,0.16)",
+      bgcolor: "#000000",
+      borderColor: "#000000",
+      color: "#fff",
+      boxShadow: "none",
     },
     "&.Mui-disabled": {
       bgcolor: "rgba(241,245,249,0.9)",

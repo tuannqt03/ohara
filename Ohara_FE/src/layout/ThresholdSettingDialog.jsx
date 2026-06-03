@@ -37,8 +37,8 @@ const thresholdColumns = [
     alarmKey: "moldTempAlarmDelta",
   },
   {
-    title: "Ambient Temperature",
-    shortTitle: "Ambient Temp",
+    title: "Temperature",
+    shortTitle: "Temp",
     unit: "°C",
     baseKey: "envTempBase",
     warningKey: "envTempWarningDelta",
@@ -472,7 +472,7 @@ export default function ThresholdSettingDialog({
             },
           }}
         >
-          {saving ? "Saving..." : "Save Settings"}
+          {saving ? "Saving..." : "Save"}
         </Button>
       </DialogActions>
     </Dialog>
