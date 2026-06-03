@@ -60,7 +60,7 @@ def get_active_machines():
 
 def generate_plc_payload(machine_id, tick):
 
-    # Máy 16 -> 24 mất toàn bộ dữ liệu
+    # Máy 17 -> 24 mất toàn bộ dữ liệu
     if 16 <= machine_id <= 24:
         return {
             "machineId": machine_id,
@@ -69,20 +69,16 @@ def generate_plc_payload(machine_id, tick):
             "hum": 0.0,
         }
 
-    # Các máy còn lại:
-    # Mold luôn bằng 0
-    # Chỉ Temp + Humidity có dữ liệu
-
+    # Máy 1 -> 16
     env_temp = round(random.uniform(27.0, 29.0), 1)
     humidity = round(random.uniform(38.0, 42.0), 1)
 
     return {
         "machineId": machine_id,
-        "moldTemp": 0.0,
+        "moldTemp": 0.0,  # chưa có dữ liệu nhiệt độ khuôn
         "temp": env_temp,
         "hum": humidity,
     }
-
 def generate_outdoor_payload(tick):
 
     # Outdoor mất dữ liệu hoàn toàn

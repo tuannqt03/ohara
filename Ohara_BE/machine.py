@@ -9,11 +9,8 @@ from settingmachine import (
     get_setting_machine_db,
     get_threshold_for_machine,
     calc_status,
-    get_active_alarm_map,
-    get_active_unconfirmed_log,
-    build_warning_message,
+    get_warning_sources,
 )
-
 
 machine_bp = Blueprint("machine", __name__)
 
@@ -84,19 +81,32 @@ def status_level(status):
     return 0
 
 
-def should_create_warning_log(active_log, new_status):
+def should_create_warning_log(latest_log, new_status, occurred_at=None):
     if new_status not in ["warning", "alarm"]:
         return False
 
-    if not active_log:
+    if not latest_log:
         return True
 
-    old_status = active_log["status"]
+    old_status = latest_log["status"]
 
     if status_level(new_status) > status_level(old_status):
         return True
 
-    return False
+    try:
+        last_time = datetime.strptime(
+            latest_log["occurred_at"],
+            "%Y-%m-%d %H:%M:%S"
+        )
+        current_time = (
+            datetime.strptime(occurred_at, "%Y-%m-%d %H:%M:%S")
+            if occurred_at
+            else datetime.now()
+        )
+
+        return (current_time - last_time).total_seconds() >= ALARM_LOG_COOLDOWN_SECONDS
+    except Exception:
+        return True
 
 
 def create_warning_log_if_needed(
@@ -111,10 +121,17 @@ def create_warning_log_if_needed(
     if status not in ["warning", "alarm"]:
         return None
 
-    active_log = get_active_unconfirmed_log(setting_conn, machine["id"])
+    latest_log = setting_conn.execute("""
+        SELECT *
+        FROM warning_alarm_logs
+        WHERE machine_id = ?
+          AND COALESCE(is_deleted, 0) = 0
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 1;
+    """, (machine["id"],)).fetchone()
 
-    if not should_create_warning_log(active_log, status):
-        return active_log["id"] if active_log else None
+    if not should_create_warning_log(latest_log, status, occurred_at):
+        return latest_log["id"] if latest_log else None
 
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -125,7 +142,7 @@ def create_warning_log_if_needed(
 
     warning_parts = []
 
-    sources = build_warning_message(
+    sources = get_warning_sources(
         mold_temp,
         env_temp,
         humidity,
@@ -256,7 +273,8 @@ def get_latest_machines():
 
     data = []
     now = datetime.now()
-    disconnect_after_seconds = 30
+    dashboard_refresh_seconds = 10
+    disconnect_after_seconds = dashboard_refresh_seconds * 2
 
     def is_disconnected(latest_row):
         if not latest_row or not latest_row["recorded_at"]:
@@ -305,23 +323,13 @@ def get_latest_machines():
                         occurred_at=latest["recorded_at"],
                     )
 
-            active_alarm_map = get_active_alarm_map(setting_conn)
-            active_alarm = active_alarm_map.get(machine["id"])
-
             if disconnected:
                 display_status = "disconnected"
-                active_log_id = None
-                need_confirm = False
-
-            elif active_alarm:
-                display_status = active_alarm["status"]
-                active_log_id = active_alarm["id"]
-                need_confirm = True
-
             else:
                 display_status = calculated_status
-                active_log_id = None
-                need_confirm = False
+
+            active_log_id = None
+            need_confirm = False
 
             data.append({
                 "id": machine["id"],
@@ -349,34 +357,43 @@ def get_chart_data():
     interval = request.args.get("interval", default=10, type=int)
     points = request.args.get("points", default=100, type=int)
 
-    allowed_intervals = [10, 30, 60, 300, 600]
+    allowed_intervals = [10, 30, 60]
 
     if interval not in allowed_intervals:
         return jsonify({
             "message": "Interval không hợp lệ",
-            "allowed": allowed_intervals
+            "allowed": allowed_intervals,
         }), 400
 
     if points <= 0:
         points = 100
-    if points > 5000:
-        points = 5000
 
     start_time_text = request.args.get("startTime", default="").strip()
     end_time_text = request.args.get("endTime", default="").strip()
 
     try:
-        end_time = (
-            datetime.strptime(end_time_text, "%Y-%m-%d %H:%M:%S")
-            if end_time_text
-            else datetime.now()
-        )
+        is_custom_range = bool(start_time_text or end_time_text)
 
-        start_time = (
-            datetime.strptime(start_time_text, "%Y-%m-%d %H:%M:%S")
-            if start_time_text
-            else end_time - timedelta(seconds=interval * points)
-        )
+        if is_custom_range:
+            if not start_time_text or not end_time_text:
+                return jsonify({
+                    "message": "Custom range cần đủ startTime và endTime"
+                }), 400
+
+            start_time = datetime.strptime(
+                start_time_text,
+                "%Y-%m-%d %H:%M:%S",
+            )
+            end_time = datetime.strptime(
+                end_time_text,
+                "%Y-%m-%d %H:%M:%S",
+            )
+        else:
+            # Realtime: lấy mốc kết thúc theo thời gian hiện tại,
+            # không lấy theo latest_time trong DB.
+            end_time = datetime.now().replace(microsecond=0)
+            start_time = end_time - timedelta(seconds=interval * points)
+
     except ValueError:
         return jsonify({
             "message": "startTime/endTime không hợp lệ, định dạng đúng là YYYY-MM-DD HH:mm:ss"
@@ -387,18 +404,10 @@ def get_chart_data():
             "message": "startTime phải nhỏ hơn endTime"
         }), 400
 
-    is_custom_range = bool(start_time_text or end_time_text)
-
-    query_interval = interval
-
-    if is_custom_range:
-        max_chart_points = 1200
-        range_seconds = int((end_time - start_time).total_seconds())
-        expected_points = max(1, range_seconds // interval)
-
-        if expected_points > max_chart_points:
-            multiplier = (expected_points + max_chart_points - 1) // max_chart_points
-            query_interval = interval * multiplier
+    # Check mất kết nối theo đúng step chart.
+    # Ví dụ interval = 10s:
+    # record cuối 08:37:20, đến 08:37:30 chưa có data mới => về 0.
+    disconnect_after_seconds = interval * 2
 
     with get_machine_db() as machine_conn:
         machines = machine_conn.execute("""
@@ -408,84 +417,136 @@ def get_chart_data():
             ORDER BY id ASC;
         """).fetchall()
 
-        rows = machine_conn.execute("""
+        # Lấy record cuối cùng trước start_time cho mỗi máy.
+        # Việc này giúp chart vẫn biết trạng thái nếu user mở đúng giữa đoạn mất kết nối.
+        latest_before_start_rows = machine_conn.execute("""
+            SELECT
+                r.machine_id,
+                r.recorded_at,
+                r.mold_temp,
+                r.env_temp,
+                r.humidity
+            FROM sensor_readings r
+            INNER JOIN (
+                SELECT
+                    machine_id,
+                    MAX(recorded_at || printf('%010d', id)) AS latest_key
+                FROM sensor_readings
+                WHERE recorded_at < ?
+                GROUP BY machine_id
+            ) latest
+                ON latest.machine_id = r.machine_id
+               AND latest.latest_key = r.recorded_at || printf('%010d', r.id)
+            ORDER BY r.machine_id ASC;
+        """, (
+            start_time.strftime("%Y-%m-%d %H:%M:%S"),
+        )).fetchall()
+
+        # Lấy dữ liệu thật trong khoảng đang xem.
+        rows_in_range = machine_conn.execute("""
             SELECT
                 machine_id,
-                datetime(
-                    (CAST(strftime('%s', recorded_at) AS INTEGER) / ?) * ?,
-                    'unixepoch'
-                ) AS time_bucket,
-                ROUND(AVG(mold_temp), 1) AS mold_temp,
-                ROUND(AVG(env_temp), 1) AS env_temp,
-                ROUND(AVG(humidity), 1) AS humidity
+                recorded_at,
+                mold_temp,
+                env_temp,
+                humidity
             FROM sensor_readings
             WHERE recorded_at >= ?
               AND recorded_at <= ?
-            GROUP BY machine_id, time_bucket
-            ORDER BY time_bucket ASC, machine_id ASC;
+            ORDER BY recorded_at ASC, machine_id ASC;
         """, (
-            query_interval,
-            query_interval,
             start_time.strftime("%Y-%m-%d %H:%M:%S"),
             end_time.strftime("%Y-%m-%d %H:%M:%S"),
         )).fetchall()
 
     machine_ids = [row["id"] for row in machines]
+    all_rows = list(latest_before_start_rows) + list(rows_in_range)
 
-    chart_map = {}
-    current = start_time.replace(microsecond=0)
+    rows_by_machine = {}
 
-    current_ts = int(current.timestamp())
-    aligned_ts = (current_ts // query_interval) * query_interval
-    current = datetime.fromtimestamp(aligned_ts)
+    for row in all_rows:
+        recorded_at = row["recorded_at"]
 
-    while current <= end_time:
-        time_key = current.strftime("%Y-%m-%d %H:%M:%S")
-
-        if query_interval >= 3600:
-            display_time = current.strftime("%d/%m %H:%M")
-        elif is_custom_range:
-            display_time = current.strftime("%d/%m %H:%M:%S")
-        else:
-            display_time = current.strftime("%H:%M:%S")
-
-        chart_map[time_key] = {
-            "time": display_time,
-            "fullTime": time_key,
-            "interval": query_interval,
-        }
-
-        for machine_id in machine_ids:
-            chart_map[time_key][f"moldTemp_{machine_id}"] = 0
-            chart_map[time_key][f"temp_{machine_id}"] = 0
-            chart_map[time_key][f"hum_{machine_id}"] = 0
-
-        current += timedelta(seconds=query_interval)
-
-    for row in rows:
-        if not row["time_bucket"]:
+        if not recorded_at:
             continue
 
-        time_key = row["time_bucket"]
-
-        if time_key not in chart_map:
+        try:
+            recorded_dt = datetime.strptime(recorded_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
             continue
 
         machine_id = row["machine_id"]
 
-        chart_map[time_key][f"moldTemp_{machine_id}"] = row["mold_temp"] or 0
-        chart_map[time_key][f"temp_{machine_id}"] = row["env_temp"] or 0
-        chart_map[time_key][f"hum_{machine_id}"] = row["humidity"] or 0
+        rows_by_machine.setdefault(machine_id, []).append({
+            "dt": recorded_dt,
+            "recorded_at": recorded_at,
+            "mold_temp": row["mold_temp"],
+            "env_temp": row["env_temp"],
+            "humidity": row["humidity"],
+        })
 
-    result = list(chart_map.values())
+    for machine_id in rows_by_machine:
+        rows_by_machine[machine_id].sort(
+            key=lambda item: (item["dt"], item["recorded_at"])
+        )
 
-    if not is_custom_range and result:
-        result = result[:-1]
+    result = []
+    machine_pointer_map = {machine_id: 0 for machine_id in machine_ids}
+    current_time = start_time.replace(microsecond=0)
 
-    if is_custom_range:
-        return jsonify(result)
+    while current_time <= end_time:
+        current_time_text = current_time.strftime("%Y-%m-%d %H:%M:%S")
 
-    return jsonify(result[-points:])
+        if interval >= 3600:
+            display_time = current_time.strftime("%d/%m %H:%M")
+        elif is_custom_range:
+            display_time = current_time.strftime("%d/%m %H:%M:%S")
+        else:
+            display_time = current_time.strftime("%H:%M:%S")
+
+        item = {
+            "time": display_time,
+            "fullTime": current_time_text,
+            "realFullTime": current_time_text,
+            "interval": interval,
+        }
+
+        for machine_id in machine_ids:
+            machine_rows = rows_by_machine.get(machine_id, [])
+            pointer = machine_pointer_map.get(machine_id, 0)
+
+            while pointer < len(machine_rows) and machine_rows[pointer]["dt"] <= current_time:
+                pointer += 1
+
+            machine_pointer_map[machine_id] = pointer
+            latest_row = machine_rows[pointer - 1] if pointer > 0 else None
+
+            item[f"moldTemp_{machine_id}"] = None
+            item[f"temp_{machine_id}"] = None
+            item[f"hum_{machine_id}"] = None
+            item[f"isDisconnected_{machine_id}"] = False
+
+            if not latest_row:
+                continue
+
+            diff_seconds = (current_time - latest_row["dt"]).total_seconds()
+
+            if diff_seconds < disconnect_after_seconds:
+                item[f"moldTemp_{machine_id}"] = latest_row["mold_temp"]
+                item[f"temp_{machine_id}"] = latest_row["env_temp"]
+                item[f"hum_{machine_id}"] = latest_row["humidity"]
+                item[f"isDisconnected_{machine_id}"] = False
+            else:
+                item[f"moldTemp_{machine_id}"] = 0
+                item[f"temp_{machine_id}"] = 0
+                item[f"hum_{machine_id}"] = 0
+                item[f"isDisconnected_{machine_id}"] = True
+
+        result.append(item)
+        current_time += timedelta(seconds=interval)
+
+    return jsonify(result)
+
 @machine_bp.route("/api/sensor-readings", methods=["POST"])
 def create_sensor_reading():
     body = request.get_json() or {}
@@ -720,7 +781,8 @@ def create_fake_history():
 
 @machine_bp.route("/api/outdoor-weather/latest", methods=["GET"])
 def get_latest_outdoor_weather():
-    disconnect_after_seconds = 30
+    dashboard_refresh_seconds = 10
+    disconnect_after_seconds = dashboard_refresh_seconds * 2
     now = datetime.now()
 
     with get_machine_db() as conn:

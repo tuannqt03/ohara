@@ -1,0 +1,74 @@
+1
+Tạo file: app.py
+
+sudo nano /etc/systemd/system/ohara-be.service
+
+nội dung:
+
+[Unit]
+Description=Ohara Backend App
+After=network.target
+
+[Service]
+Type=simple
+User=ohara
+WorkingDirectory=/home/ohara/BE
+ExecStart=/home/ohara/BE/venv/bin/python /home/ohara/BE/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+2
+Tạo file:
+
+sudo nano /etc/systemd/system/ohara-plc.service
+
+nội dung:
+
+[Unit]
+Description=Ohara PLC DB Communication
+After=network.target
+
+[Service]
+Type=simple
+User=ohara
+WorkingDirectory=/home/ohara/BE
+ExecStart=/home/ohara/BE/venv/bin/python /home/ohara/BE/PLC_DB_Comm.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+3
+sudo nano /etc/systemd/system/ohara-fe.service
+
+nội dung:
+
+[Unit]
+Description=Ohara Frontend
+After=network.target
+
+[Service]
+Type=simple
+User=ohara
+WorkingDirectory=/home/ohara/FE
+ExecStart=/usr/bin/npm run dev
+Restart=always
+RestartSec=5
+Environment=HOST=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target
+
+
+Reload systemd
+
+Sau khi tạo xong 3 file:
+sudo systemctl daemon-reload
+
+Bật tự khởi động khi mở máy
+
+sudo systemctl enable ohara-be
+sudo systemctl enable ohara-plc
+sudo systemctl enable ohara-fe
