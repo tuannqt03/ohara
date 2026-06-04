@@ -1270,7 +1270,7 @@ function ChartBox({
       grid: {
         top: 10,
         right: 18,
-        bottom: shouldShowDateOnXAxis ? 40 : 33,
+        bottom: shouldShowDateOnXAxis ? 44 : 36,
         left: 18,
         containLabel: false,
       },
@@ -1359,7 +1359,13 @@ function ChartBox({
         min: xAxisDomain?.[0],
         max: xAxisDomain?.[1],
         boundaryGap: false,
-        axisLine: { show: false },
+        axisLine: {
+          show: true,
+          lineStyle: {
+            color: "#111827",
+            width: 1,
+          },
+        },
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: {
