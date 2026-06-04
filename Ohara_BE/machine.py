@@ -14,7 +14,6 @@ from settingmachine import (
 
 machine_bp = Blueprint("machine", __name__)
 
-ALARM_LOG_COOLDOWN_SECONDS = 15 * 60
 
 
 def get_machine_db():
@@ -73,73 +72,24 @@ def generate_safe_outdoor_values():
     )
 
 
-def status_level(status):
-    if status == "alarm":
-        return 2
-    if status == "warning":
-        return 1
-    return 0
+
+def ensure_warning_alarm_logs_schema(setting_conn):
+    """Đảm bảo bảng log có cột resolved_at để biết cảnh báo đã kết thúc chưa."""
+    columns = setting_conn.execute("""
+        PRAGMA table_info(warning_alarm_logs);
+    """).fetchall()
+
+    column_names = {column["name"] for column in columns}
+
+    if "resolved_at" not in column_names:
+        setting_conn.execute("""
+            ALTER TABLE warning_alarm_logs
+            ADD COLUMN resolved_at TEXT;
+        """)
+        setting_conn.commit()
 
 
-def should_create_warning_log(latest_log, new_status, occurred_at=None):
-    if new_status not in ["warning", "alarm"]:
-        return False
-
-    if not latest_log:
-        return True
-
-    old_status = latest_log["status"]
-
-    if status_level(new_status) > status_level(old_status):
-        return True
-
-    try:
-        last_time = datetime.strptime(
-            latest_log["occurred_at"],
-            "%Y-%m-%d %H:%M:%S"
-        )
-        current_time = (
-            datetime.strptime(occurred_at, "%Y-%m-%d %H:%M:%S")
-            if occurred_at
-            else datetime.now()
-        )
-
-        return (current_time - last_time).total_seconds() >= ALARM_LOG_COOLDOWN_SECONDS
-    except Exception:
-        return True
-
-
-def create_warning_log_if_needed(
-    setting_conn,
-    machine,
-    mold_temp,
-    env_temp,
-    humidity,
-    status,
-    occurred_at=None,
-):
-    if status not in ["warning", "alarm"]:
-        return None
-
-    latest_log = setting_conn.execute("""
-        SELECT *
-        FROM warning_alarm_logs
-        WHERE machine_id = ?
-          AND COALESCE(is_deleted, 0) = 0
-        ORDER BY occurred_at DESC, id DESC
-        LIMIT 1;
-    """, (machine["id"],)).fetchone()
-
-    if not should_create_warning_log(latest_log, status, occurred_at):
-        return latest_log["id"] if latest_log else None
-
-    occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    threshold = get_threshold_for_machine(
-        setting_conn,
-        machine["id"],
-    )
-
+def build_warning_message(mold_temp, env_temp, humidity, threshold):
     warning_parts = []
 
     sources = get_warning_sources(
@@ -158,7 +108,69 @@ def create_warning_log_if_needed(
     if "Humidity" in sources:
         warning_parts.append(f"Humidity ({humidity}%)")
 
-    message = ", ".join(warning_parts)
+    return ", ".join(warning_parts)
+
+def create_warning_log_if_needed(
+    setting_conn,
+    machine,
+    mold_temp,
+    env_temp,
+    humidity,
+    status,
+    occurred_at=None,
+):
+    """
+    Ghi log theo phiên cảnh báo:
+    - Một máy đang warning/alarm liên tục thì chỉ tạo 1 log active.
+    - Khi máy về normal thì đóng log active bằng resolved_at.
+    - Sau khi đã normal, nếu lại warning/alarm thì tạo log mới.
+    """
+    ensure_warning_alarm_logs_schema(setting_conn)
+
+    occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if status == "normal":
+        setting_conn.execute("""
+            UPDATE warning_alarm_logs
+            SET resolved_at = ?
+            WHERE machine_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND resolved_at IS NULL;
+        """, (
+            occurred_at_text,
+            machine["id"],
+        ))
+
+        setting_conn.commit()
+        return None
+
+    if status not in ["warning", "alarm"]:
+        return None
+
+    threshold = get_threshold_for_machine(
+        setting_conn,
+        machine["id"],
+    )
+
+    message = build_warning_message(
+        mold_temp,
+        env_temp,
+        humidity,
+        threshold,
+    )
+
+    active_log = setting_conn.execute("""
+        SELECT *
+        FROM warning_alarm_logs
+        WHERE machine_id = ?
+          AND COALESCE(is_deleted, 0) = 0
+          AND resolved_at IS NULL
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 1;
+    """, (machine["id"],)).fetchone()
+
+    if active_log:
+        return active_log["id"]
 
     cursor = setting_conn.execute("""
         INSERT INTO warning_alarm_logs (
@@ -169,9 +181,10 @@ def create_warning_log_if_needed(
             status,
             message,
             occurred_at,
+            resolved_at,
             is_confirmed
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0);
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0);
     """, (
         machine["id"],
         mold_temp,
@@ -312,16 +325,15 @@ def get_latest_machines():
                     humidity,
                 )
 
-                if calculated_status in ["warning", "alarm"]:
-                    create_warning_log_if_needed(
-                        setting_conn=setting_conn,
-                        machine=machine,
-                        mold_temp=mold_temp,
-                        env_temp=env_temp,
-                        humidity=humidity,
-                        status=calculated_status,
-                        occurred_at=latest["recorded_at"],
-                    )
+                create_warning_log_if_needed(
+                    setting_conn=setting_conn,
+                    machine=machine,
+                    mold_temp=mold_temp,
+                    env_temp=env_temp,
+                    humidity=humidity,
+                    status=calculated_status,
+                    occurred_at=latest["recorded_at"],
+                )
 
             if disconnected:
                 display_status = "disconnected"
@@ -600,16 +612,15 @@ def create_sensor_reading():
         sensor_id = cursor.lastrowid
         machine_conn.commit()
 
-    if status in ["warning", "alarm"]:
-        with get_setting_machine_db() as setting_conn:
-            create_warning_log_if_needed(
-                setting_conn=setting_conn,
-                machine=machine,
-                mold_temp=mold_temp,
-                env_temp=env_temp,
-                humidity=humidity,
-                status=status,
-            )
+    with get_setting_machine_db() as setting_conn:
+        create_warning_log_if_needed(
+            setting_conn=setting_conn,
+            machine=machine,
+            mold_temp=mold_temp,
+            env_temp=env_temp,
+            humidity=humidity,
+            status=status,
+        )
 
     return jsonify({
         "message": "Lưu dữ liệu PLC thành công",
@@ -666,15 +677,14 @@ def create_fake_sensor_readings():
             elif status == "alarm":
                 alarm_count += 1
 
-            if status in ["warning", "alarm"]:
-                create_warning_log_if_needed(
-                    setting_conn=setting_conn,
-                    machine=machine,
-                    mold_temp=mold_temp,
-                    env_temp=env_temp,
-                    humidity=humidity,
-                    status=status,
-                )
+            create_warning_log_if_needed(
+                setting_conn=setting_conn,
+                machine=machine,
+                mold_temp=mold_temp,
+                env_temp=env_temp,
+                humidity=humidity,
+                status=status,
+            )
 
             inserted += 1
 
@@ -751,16 +761,15 @@ def create_fake_history():
                 elif status == "alarm":
                     alarm_count += 1
 
-                if status in ["warning", "alarm"]:
-                    create_warning_log_if_needed(
-                        setting_conn=setting_conn,
-                        machine=machine,
-                        mold_temp=mold_temp,
-                        env_temp=env_temp,
-                        humidity=humidity,
-                        status=status,
-                        occurred_at=current_time_text,
-                    )
+                create_warning_log_if_needed(
+                    setting_conn=setting_conn,
+                    machine=machine,
+                    mold_temp=mold_temp,
+                    env_temp=env_temp,
+                    humidity=humidity,
+                    status=status,
+                    occurred_at=current_time_text,
+                )
 
                 inserted += 1
 
