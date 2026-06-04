@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Paper,
@@ -13,15 +13,7 @@ import {
   CircularProgress,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  ResponsiveContainer,
-} from "recharts";
+import * as echarts from "echarts";
 
 import { temperatureHumidityApi } from "../config/api";
 import ChartToolbar, { CHART_OPTIONS } from "./ChartToolbar";
@@ -392,12 +384,10 @@ export default function MachineChartDialog({
     if (chartInitialized) return;
 
     const initChart = async () => {
-      try {
-        setLoading(true);
+  try {
+    setLoading(true);
 
-        setVisibleCharts(CHART_OPTIONS.map((x) => x.value));
-
-        const timeRes = await temperatureHumidityApi.getChartTimeSettings();
+    const timeRes = await temperatureHumidityApi.getChartTimeSettings();
         const data = Array.isArray(timeRes.data) ? timeRes.data : [];
 
         let nextTimeOptions = DEFAULT_TIME_OPTIONS;
@@ -1151,110 +1141,269 @@ function ChartBox({
   navDisabled,
   showNavButtons,
 }) {
+  const safeData = Array.isArray(data) ? data : [];
+  const safeSelectedMachines = Array.isArray(selectedMachines)
+    ? selectedMachines
+    : [];
+
+  const disconnectedCount = disconnectedMachineIds?.length || 0;
+
   const formatDateKey = useCallback((date) => {
-  if (!date || Number.isNaN(date.getTime())) return "";
-
-  const pad = (n) => String(n).padStart(2, "0");
-
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-    date.getDate()
-  )}`;
-}, []);
-
-const shouldShowDateOnXAxis = useMemo(() => {
-  if (!isManualTimeWindow || !xAxisDomain || xAxisDomain.length !== 2) {
-    return false;
-  }
-
-  const startDate = new Date(xAxisDomain[0]);
-  const endDate = new Date(xAxisDomain[1]);
-
-  if (
-    Number.isNaN(startDate.getTime()) ||
-    Number.isNaN(endDate.getTime())
-  ) {
-    return false;
-  }
-
-  return formatDateKey(startDate) !== formatDateKey(endDate);
-}, [isManualTimeWindow, xAxisDomain, formatDateKey]);
-
-const formatChartTime = useCallback(
-  (value) => {
-    if (!value) return "";
-
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
+    if (!date || Number.isNaN(date.getTime())) return "";
 
     const pad = (n) => String(n).padStart(2, "0");
 
-    const timeText = `${pad(date.getHours())}:${pad(
-      date.getMinutes()
-    )}:${pad(date.getSeconds())}`;
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+      date.getDate()
+    )}`;
+  }, []);
 
-    if (!shouldShowDateOnXAxis) {
-      return timeText;
+  const shouldShowDateOnXAxis = useMemo(() => {
+    if (!isManualTimeWindow || !xAxisDomain || xAxisDomain.length !== 2) {
+      return false;
     }
 
-    const dateText = `${pad(date.getDate())}/${pad(
-      date.getMonth() + 1
-    )}/${date.getFullYear()}`;
+    const startDate = new Date(xAxisDomain[0]);
+    const endDate = new Date(xAxisDomain[1]);
 
-    return `${dateText} | ${timeText}`;
-  },
-  [shouldShowDateOnXAxis]
-);
-
-  const visualXAxisDomain = useMemo(() => {
-    return xAxisDomain;
-  }, [xAxisDomain]);
-  const xAxisTicks = useMemo(() => {
-    if (visualXAxisDomain?.length === 2) {
-      return visualXAxisDomain;
-    }
-
-    return [];
-  }, [visualXAxisDomain]);
-
-  const yAxisTicks = useMemo(() => {
-    const min = Number(axisSetting?.min ?? 0);
-    const max = Number(axisSetting?.max ?? 100);
-    const scale = Number(axisSetting?.scale ?? 10);
-
-    if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(scale)) {
-      return undefined;
-    }
-
-    if (scale <= 0 || max <= min) {
-      return undefined;
-    }
-
-    const ticks = [];
-
-    for (let value = min; value <= max; value += scale) {
-      ticks.push(Number(value.toFixed(6)));
-    }
-
-    if (ticks[ticks.length - 1] !== max) {
-      ticks.push(max);
-    }
-
-    return ticks;
-  }, [axisSetting]);
-
-  const yAxisDomain = useMemo(() => {
     if (
-      yZoomRange &&
-      Number.isFinite(yZoomRange.min) &&
-      Number.isFinite(yZoomRange.max)
+      Number.isNaN(startDate.getTime()) ||
+      Number.isNaN(endDate.getTime())
     ) {
-      return [yZoomRange.min, yZoomRange.max];
+      return false;
     }
 
-    return [Number(axisSetting?.min ?? 0), Number(axisSetting?.max ?? 100)];
-  }, [axisSetting, yZoomRange]);
+    return formatDateKey(startDate) !== formatDateKey(endDate);
+  }, [isManualTimeWindow, xAxisDomain, formatDateKey]);
 
-  const disconnectedCount = disconnectedMachineIds?.length || 0;
+  const formatChartTime = useCallback(
+    (value) => {
+      if (!value) return "";
+
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+
+      const pad = (n) => String(n).padStart(2, "0");
+
+      const timeText = `${pad(date.getHours())}:${pad(
+        date.getMinutes()
+      )}:${pad(date.getSeconds())}`;
+
+      if (!shouldShowDateOnXAxis) {
+        return timeText;
+      }
+
+      const dateText = `${pad(date.getDate())}/${pad(
+        date.getMonth() + 1
+      )}/${date.getFullYear()}`;
+
+      return `${dateText} | ${timeText}`;
+    },
+    [shouldShowDateOnXAxis]
+  );
+
+  const yMin =
+    yZoomRange && Number.isFinite(yZoomRange.min)
+      ? yZoomRange.min
+      : Number(axisSetting?.min ?? 0);
+
+  const yMax =
+    yZoomRange && Number.isFinite(yZoomRange.max)
+      ? yZoomRange.max
+      : Number(axisSetting?.max ?? 100);
+
+  const yScale = Number(axisSetting?.scale ?? 10);
+
+  const option = useMemo(() => {
+    const series = safeSelectedMachines.map((id) => {
+      const color = machineColors[(id - 1) % machineColors.length];
+
+      return {
+        name: machineNameMap?.[id] || `Machine ${id}`,
+        type: "line",
+
+        // dot
+        showSymbol: false,
+        showAllSymbol: false,
+        symbol: "circle",
+        symbolSize: 5,
+
+        smooth: false,
+        animation: false,
+        connectNulls: false,
+        sampling: "lttb",
+
+        lineStyle: {
+          width: 1.4,
+          color,
+          opacity: 0.65,
+        },
+
+        itemStyle: {
+          color,
+          opacity: 0.95,
+        },
+
+        emphasis: {
+          focus: "none",
+          scale: true,
+          itemStyle: {
+            opacity: 1,
+          },
+          lineStyle: {
+            width: 2,
+            opacity: 1,
+          },
+        },
+
+        data: safeData.map((row) => [
+          row.xTs,
+          row[`${dataPrefix}_${id}`] ?? null,
+        ]),
+      };
+    });
+
+    return {
+      animation: false,
+      useUTC: false,
+      backgroundColor: colors.white,
+      grid: {
+        top: 10,
+        right: 18,
+        bottom: shouldShowDateOnXAxis ? 40 : 33,
+        left: 18,
+        containLabel: false,
+      },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        transitionDuration: 0,
+        backgroundColor: colors.white,
+        borderColor: colors.border,
+        borderWidth: 1,
+        extraCssText:
+          "border-radius:10px;box-shadow:0 8px 20px rgba(15,23,42,0.16);",
+        axisPointer: {
+          type: "line",
+          snap: true,
+          lineStyle: {
+            type: "dashed",
+            width: 1,
+            color: "#64748b",
+          },
+        },
+        textStyle: {
+          fontFamily,
+          fontSize: 11,
+          fontWeight: 700,
+          color: colors.head,
+        },
+        formatter: (params) => {
+          if (!Array.isArray(params) || params.length === 0) return "";
+
+          const timeValue = params[0]?.value?.[0];
+          const time = new Date(timeValue);
+          const pad = (n) => String(n).padStart(2, "0");
+          const timeText = Number.isNaN(time.getTime())
+            ? ""
+            : `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(
+                time.getDate()
+              )} ${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(
+                time.getSeconds()
+              )}`;
+
+          const rows = params
+            .filter(
+              (p) =>
+                p.value?.[1] !== null &&
+                p.value?.[1] !== undefined &&
+                p.value?.[1] !== ""
+            )
+            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`)
+            .join("<br/>");
+
+          return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
+        },
+      },
+      graphic:
+        xAxisDomain && xAxisDomain.length === 2
+          ? [
+              {
+                type: "text",
+                left: 8,
+                bottom: 8,
+                silent: true,
+                style: {
+                  text: formatChartTime(xAxisDomain[0]),
+                  fill: colors.head,
+                  font: `800 10px ${fontFamily}`,
+                  textAlign: "left",
+                },
+              },
+              {
+                type: "text",
+                right: 8,
+                bottom: 8,
+                silent: true,
+                style: {
+                  text: formatChartTime(xAxisDomain[1]),
+                  fill: colors.head,
+                  font: `800 10px ${fontFamily}`,
+                  textAlign: "right",
+                },
+              },
+            ]
+          : [],
+      xAxis: {
+        type: "time",
+        min: xAxisDomain?.[0],
+        max: xAxisDomain?.[1],
+        boundaryGap: false,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        axisLabel: {
+          show: false,
+        },
+      },
+      yAxis: {
+        type: "value",
+        min: yMin,
+        max: yMax,
+        interval:
+          Number.isFinite(yScale) && yScale > 0 ? yScale : undefined,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: {
+          show: true,
+          lineStyle: {
+            type: "dashed",
+            color: "#cbd5e1",
+          },
+        },
+        axisLabel: {
+          color: colors.head,
+          fontFamily,
+          fontSize: 10,
+          fontWeight: 800,
+        },
+      },
+      series,
+    };
+  }, [
+    safeData,
+    safeSelectedMachines,
+    machineColors,
+    machineNameMap,
+    dataPrefix,
+    colors,
+    fontFamily,
+    xAxisDomain,
+    yMin,
+    yMax,
+    yScale,
+    formatChartTime,
+  ]);
 
   return (
     <Paper
@@ -1280,43 +1429,6 @@ const formatChartTime = useCallback(
         position: "relative",
         cursor: "default",
         outline: "none !important",
-
-        "&:focus, &:focus-visible, &:active": {
-          outline: "none !important",
-          boxShadow: "0 3px 10px rgba(15,23,42,0.06)",
-        },
-
-        "& *": {
-          outline: "none !important",
-        },
-
-        "& *:focus, & *:focus-visible, & *:active": {
-          outline: "none !important",
-        },
-
-        "& .recharts-wrapper": {
-          outline: "none !important",
-        },
-
-        "& .recharts-wrapper:focus, & .recharts-wrapper:focus-visible": {
-          outline: "none !important",
-        },
-
-        "& .recharts-surface": {
-          outline: "none !important",
-        },
-
-        "& .recharts-surface:focus, & .recharts-surface:focus-visible": {
-          outline: "none !important",
-        },
-
-        "& svg": {
-          outline: "none !important",
-        },
-
-        "& svg:focus, & svg:focus-visible, & svg:active": {
-          outline: "none !important",
-        },
       }}
     >
       <Typography
@@ -1357,7 +1469,7 @@ const formatChartTime = useCallback(
         </Box>
       )}
 
-      {data.length === 0 && !loading && (
+      {safeData.length === 0 && !loading && (
         <Typography
           sx={{
             position: "absolute",
@@ -1369,13 +1481,12 @@ const formatChartTime = useCallback(
             fontSize: 13,
             fontWeight: 700,
             pointerEvents: "none",
+            zIndex: 2,
           }}
         >
           No chart data
         </Typography>
       )}
-
-    
 
       {showNavButtons && (
         <Box sx={chartNavGroupSx}>
@@ -1425,140 +1536,81 @@ const formatChartTime = useCallback(
           minHeight: 0,
         }}
       >
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart
-            data={data}
-            tabIndex={-1}
-            margin={{
-              top: 2,
-              right: 20,
-              left: -5,
-              bottom: 12,
-            }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
-
-            <XAxis
-              dataKey="xTs"
-              type="number"
-              scale="time"
-              domain={visualXAxisDomain || ["dataMin", "dataMax"]}
-              padding={{ left: 0, right: 0 }}
-              ticks={xAxisTicks}
-              interval={0}
-              tickFormatter={formatChartTime}
-              stroke="none"
-              allowDataOverflow
-              tick={(props) => {
-                const { x, y, payload, index } = props;
-
-                const isFirst = index === 0;
-                const isLast =
-                  xAxisTicks.length > 1 && index === xAxisTicks.length - 1;
-
-                return (
-                  <g transform={`translate(${x},${y})`}>
-                    <text
-                      x={isFirst ? -18 : 0}
-                      dy={16}
-                      textAnchor={isFirst ? "start" : isLast ? "end" : "middle"}
-                      fill={colors.head}
-                      fontSize={10}
-                      fontWeight={800}
-                      fontFamily={fontFamily}
-                    >
-                      {formatChartTime(payload.value)}
-                    </text>
-                  </g>
-                );
-              }}
-              axisLine={false}
-              tickLine={false}
-            />
-
-            <YAxis
-              width={40}
-              domain={yAxisDomain}
-              ticks={yZoomRange ? undefined : yAxisTicks}
-              allowDataOverflow
-              tickMargin={2}
-              stroke="none"
-              tick={{
-                fontSize: 10,
-                fontWeight: 800,
-                fill: colors.head,
-                fontFamily,
-              }}
-              axisLine={false}
-              tickLine={false}
-            />
-
-            <Tooltip
-              cursor={{
-                stroke: "#64748b",
-                strokeWidth: 1,
-                strokeDasharray: "3 3",
-              }}
-              contentStyle={{
-                borderRadius: 10,
-                border: `1px solid ${colors.border}`,
-                fontSize: 11,
-                fontWeight: 600,
-                color: colors.head,
-                fontFamily,
-                boxShadow: "0 8px 20px rgba(15,23,42,0.16)",
-              }}
-              labelStyle={{
-                fontWeight: 800,
-                color: colors.head,
-                fontFamily,
-                fontSize: 11,
-              }}
-              itemStyle={{
-                fontFamily,
-                fontWeight: 700,
-                fontSize: 11,
-              }}
-              formatter={(value, name) => [value, name]}
-              labelFormatter={(label, payload) => {
-                const row = payload?.[0]?.payload;
-                const realTime = row?.realFullTime || row?.fullTime;
-
-                if (realTime) {
-                  return `Time: ${String(realTime).replace(" ", " | ")}`;
-                }
-
-                return `Time: ${formatChartTime(label)}`;
-              }}
-            />
-
-            {selectedMachines.map((id) => (
-              <Line
-                key={`${dataPrefix}_${id}`}
-                type="monotone"
-                dataKey={`${dataPrefix}_${id}`}
-                name={machineNameMap?.[id] || `Machine ${id}`}
-                dot={false}
-                strokeWidth={2.3}
-                stroke={machineColors[(id - 1) % machineColors.length]}
-                activeDot={{
-                  r: 4,
-                  fill: machineColors[(id - 1) % machineColors.length],
-                  stroke: "none",
-                }}
-                isAnimationActive={false}
-                connectNulls={false}
-              />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
+        <EChartsCanvas
+          option={option}
+          style={{
+            width: "100%",
+            height: "100%",
+          }}
+        />
       </Box>
     </Paper>
   );
 }
+
+function EChartsCanvas({ option, style }) {
+  const domRef = useRef(null);
+  const chartRef = useRef(null);
+  const resizeObserverRef = useRef(null);
+
+  useEffect(() => {
+    if (!domRef.current) return undefined;
+
+    chartRef.current = echarts.init(domRef.current, null, {
+      renderer: "canvas",
+    });
+
+    const handleResize = () => {
+      chartRef.current?.resize();
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserverRef.current = new ResizeObserver(() => {
+        window.requestAnimationFrame(() => {
+          chartRef.current?.resize();
+        });
+      });
+
+      resizeObserverRef.current.observe(domRef.current);
+    }
+
+    window.requestAnimationFrame(() => {
+      chartRef.current?.resize();
+    });
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+        resizeObserverRef.current = null;
+      }
+
+      if (chartRef.current) {
+        chartRef.current.dispose();
+        chartRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chartRef.current || !option) return;
+
+    chartRef.current.setOption(option, true);
+
+    window.requestAnimationFrame(() => {
+      chartRef.current?.resize();
+    });
+  }, [option]);
+
+  return <div ref={domRef} style={style} />;
+}
+
 const chartNavGroupSx = {
   position: "absolute",
-  bottom: 10,
+  bottom: 8,
   left: "50%",
   transform: "translateX(-50%)",
   zIndex: 20,

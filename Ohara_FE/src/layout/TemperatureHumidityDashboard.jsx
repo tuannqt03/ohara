@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Box,
   Paper,
@@ -136,7 +137,7 @@ const formatMetric = (value, unit) => {
   return `${value}${unit}`;
 };
 
-export default function TemperatureHumidityDashboard() {
+export default function TemperatureHumidityDashboard({ defaultOpenChart = false }) {
   const [machines, setMachines] = useState([]);
   const [outdoorWeather, setOutdoorWeather] = useState({
     temp: null,
@@ -148,8 +149,9 @@ export default function TemperatureHumidityDashboard() {
   const [settingOpen, setSettingOpen] = useState(false);
   const [selectedSettingMachine, setSelectedSettingMachine] = useState(null);
   const [machineSetting, setMachineSetting] = useState(null);
-
-  const [chartOpen, setChartOpen] = useState(false);
+  const navigate = useNavigate();
+  const hasOpenedChartFromRoute = useRef(false);
+  const [chartOpen, setChartOpen] = useState(defaultOpenChart);
   const [chartMode, setChartMode] = useState("all");
   const [selectedMachines, setSelectedMachines] = useState(null);
   const [selectedLogMachine, setSelectedLogMachine] = useState(null);
@@ -157,6 +159,26 @@ export default function TemperatureHumidityDashboard() {
   const [warningLogOpen, setWarningLogOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
+  useEffect(() => {
+  const reloadTimer = window.setTimeout(() => {
+    window.location.reload();
+  }, 10 * 60 * 1000); // 10 phút
+
+  return () => {
+    window.clearTimeout(reloadTimer);
+  };
+}, []);
+  useEffect(() => {
+    if (!defaultOpenChart) return;
+    if (machineIds.length === 0) return;
+    if (hasOpenedChartFromRoute.current) return;
+
+    hasOpenedChartFromRoute.current = true;
+
+    setChartMode("all");
+    setSelectedMachines(machineIds);
+  }, [defaultOpenChart, machineIds]);
+
   const loadOutdoorWeather = async () => {
     try {
       const res = await temperatureHumidityApi.getOutdoorWeatherLatest();
@@ -179,9 +201,11 @@ export default function TemperatureHumidityDashboard() {
     }
   };
 
-  const loadDashboardData = async () => {
+  const loadDashboardData = async (showLoading = false) => {
     try {
-      setLoading(true);
+      if (showLoading) {
+        setLoading(true);
+      }
 
       const machineRes = await temperatureHumidityApi.getLatestMachines();
       const nextMachines = Array.isArray(machineRes.data) ? machineRes.data : [];
@@ -196,21 +220,41 @@ export default function TemperatureHumidityDashboard() {
     } catch (error) {
       console.error("Failed to load machines:", error);
     } finally {
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   };
+
   useEffect(() => {
-    const loadAllDashboardData = async () => {
-      await Promise.all([loadDashboardData(), loadOutdoorWeather()]);
+    let alive = true;
+    let running = false;
+
+    const loadAllDashboardData = async (showLoading = false) => {
+      if (running) return;
+
+      running = true;
+
+      try {
+        await Promise.all([
+          loadDashboardData(showLoading),
+          loadOutdoorWeather(),
+        ]);
+      } finally {
+        running = false;
+      }
     };
 
-    loadAllDashboardData();
+    loadAllDashboardData(true);
 
     const dashboardTimer = setInterval(() => {
-      loadAllDashboardData();
+      if (!alive) return;
+
+      loadAllDashboardData(false);
     }, 10000);
 
     return () => {
+      alive = false;
       clearInterval(dashboardTimer);
     };
   }, []);
@@ -236,8 +280,16 @@ export default function TemperatureHumidityDashboard() {
     setSelectedMachines(machineIds);
     setChartOpen(true);
     setActionMenuOpen(false);
-  };
 
+    navigate("/chart");
+  };
+  const closeChart = () => {
+    setChartOpen(false);
+
+    if (defaultOpenChart) {
+      navigate("/dashboard");
+    }
+  };
   const openWarningLog = () => {
     setSelectedLogMachine(null);
     setWarningLogOpen(true);
@@ -634,12 +686,12 @@ export default function TemperatureHumidityDashboard() {
             machineId: selectedSettingMachine.id,
           });
 
-          await loadDashboardData();
+          loadDashboardData(false);
         }}
       />
       <MachineChartDialog
         open={chartOpen}
-        onClose={() => setChartOpen(false)}
+        onClose={closeChart}
         chartMode={chartMode}
         machines={machines}
         selectedMachines={selectedMachines || []}

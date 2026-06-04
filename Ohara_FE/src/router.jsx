@@ -8,6 +8,11 @@ export default function AppRouter() {
     <Routes>
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<TemperatureHumidityDashboard />} />
+      <Route
+        path="/chart"
+        element={<TemperatureHumidityDashboard defaultOpenChart />}
+      />
+
       <Route path="/warning-log" element={<WarningLogPage />} />
     </Routes>
   );

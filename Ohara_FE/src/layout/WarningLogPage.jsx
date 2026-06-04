@@ -107,85 +107,35 @@ export default function WarningLogDialog({
   const [loading, setLoading] = useState(false);
 
   const resolveInitialDate = async () => {
-    const today = getTodayInputDate();
-
-    if (!selectedMachine?.id) {
-      setFromDate(today);
-      setDateReady(true);
-      return;
-    }
-
-    try {
-      setLoading(true);
-
-      const res = await temperatureHumidityApi.getWarningLogs({
-        status: "all",
-        date: "",
-        machine: "",
-        machineId: selectedMachine.id,
-      });
-
-      const allLogs = Array.isArray(res.data) ? res.data : [];
-      const sortedLogs = sortLogsNewestFirst(allLogs);
-
-      const hasTodayLog = sortedLogs.some(
-        (log) => getInputDateFromLogTime(log.time) === today
-      );
-
-      if (hasTodayLog) {
-        setFromDate(today);
-        return;
-      }
-
-      const activeLogById = selectedMachine?.activeLogId
-        ? sortedLogs.find(
-            (log) => Number(log.id) === Number(selectedMachine.activeLogId)
-          )
-        : null;
-
-      if (activeLogById) {
-        const activeDate = getInputDateFromLogTime(activeLogById.time);
-        setFromDate(activeDate || today);
-        return;
-      }
-
-      if (sortedLogs.length > 0) {
-        const latestDate = getInputDateFromLogTime(sortedLogs[0].time);
-        setFromDate(latestDate || today);
-        return;
-      }
-
-      setFromDate(today);
-    } catch (error) {
-      console.error("Failed to resolve initial log date:", error);
-      setFromDate(today);
-    } finally {
-      setDateReady(true);
-      setLoading(false);
-    }
+    setFromDate(getTodayInputDate());
+    setDateReady(true);
   };
 
-  const loadLogs = async () => {
-    if (!dateReady) return;
+  const loadLogs = async (showLoading = false) => {
+  if (!dateReady) return;
 
-    try {
+  try {
+    if (showLoading) {
       setLoading(true);
+    }
 
-      const res = await temperatureHumidityApi.getWarningLogs({
-        status: statusFilter,
-        date: fromDate,
-        machine: searchMachine,
-        machineId: selectedMachine?.id || "",
-      });
+    const res = await temperatureHumidityApi.getWarningLogs({
+      status: statusFilter,
+      date: fromDate,
+      machine: searchMachine,
+      machineId: selectedMachine?.id || "",
+    });
 
-      setLogs(Array.isArray(res.data) ? res.data : []);
-    } catch (error) {
-      console.error("Failed to load warning logs:", error);
-      setLogs([]);
-    } finally {
+    setLogs(Array.isArray(res.data) ? res.data : []);
+  } catch (error) {
+    console.error("Failed to load warning logs:", error);
+    setLogs([]);
+  } finally {
+    if (showLoading) {
       setLoading(false);
     }
-  };
+  }
+};
 
   useEffect(() => {
     if (!open) {
@@ -202,14 +152,16 @@ export default function WarningLogDialog({
   }, [open, selectedMachine?.id, selectedMachine?.activeLogId]);
 
   useEffect(() => {
-    if (!open || !dateReady) return;
+  if (!open || !dateReady) return;
 
-    loadLogs();
+  loadLogs(true);
 
-    const timer = setInterval(loadLogs, 5000);
+  const timer = setInterval(() => {
+    loadLogs(false);
+  }, 5000);
 
-    return () => clearInterval(timer);
-  }, [open, dateReady, statusFilter, fromDate, searchMachine, selectedMachine?.id]);
+  return () => clearInterval(timer);
+}, [open, dateReady, statusFilter, fromDate, searchMachine, selectedMachine?.id]);
 
   const warningCount = useMemo(
     () => logs.filter((x) => x.status === "warning").length,
