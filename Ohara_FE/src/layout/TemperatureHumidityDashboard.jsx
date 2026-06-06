@@ -57,7 +57,11 @@ const MACHINE_COLORS = [
   "#a855f7",
   "#ef4444",
 ];
+const DASHBOARD_REFRESH_MS = 10 * 1000;
 
+const DASHBOARD_AUTO_RELOAD_MS = 30 * 60 * 1000;
+
+const DASHBOARD_RESTORE_KEY = "temperatureHumidityDashboardRestoreV1";
 const statusStyle = {
   normal: {
     label: "Normal",
@@ -136,8 +140,23 @@ const formatMetric = (value, unit) => {
 
   return `${value}${unit}`;
 };
+const loadSavedDashboardState = () => {
+  try {
+    const raw = window.sessionStorage.getItem(DASHBOARD_RESTORE_KEY);
+    if (!raw) return null;
 
+    const parsed = JSON.parse(raw);
+
+    window.sessionStorage.removeItem(DASHBOARD_RESTORE_KEY);
+
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    console.warn("Failed to load dashboard restore state:", error);
+    return null;
+  }
+};
 export default function TemperatureHumidityDashboard({ defaultOpenChart = false }) {
+  const savedDashboardState = useMemo(() => loadSavedDashboardState(), []);
   const [machines, setMachines] = useState([]);
   const [outdoorWeather, setOutdoorWeather] = useState({
     temp: null,
@@ -146,28 +165,76 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
     isDisconnected: true,
   });
 
-  const [settingOpen, setSettingOpen] = useState(false);
-  const [selectedSettingMachine, setSelectedSettingMachine] = useState(null);
+  const [settingOpen, setSettingOpen] = useState(
+  Boolean(savedDashboardState?.settingOpen)
+  );
+
+  const [selectedSettingMachine, setSelectedSettingMachine] = useState(
+    savedDashboardState?.selectedSettingMachine || null
+  );
+
   const [machineSetting, setMachineSetting] = useState(null);
   const navigate = useNavigate();
   const hasOpenedChartFromRoute = useRef(false);
-  const [chartOpen, setChartOpen] = useState(defaultOpenChart);
-  const [chartMode, setChartMode] = useState("all");
-  const [selectedMachines, setSelectedMachines] = useState(null);
-  const [selectedLogMachine, setSelectedLogMachine] = useState(null);
-  const [actionMenuOpen, setActionMenuOpen] = useState(false);
-  const [warningLogOpen, setWarningLogOpen] = useState(false);
+  const autoReloadTimerRef = useRef(null);
+  const [chartOpen, setChartOpen] = useState(
+    savedDashboardState?.chartOpen ?? defaultOpenChart
+  );
+
+  const [chartMode, setChartMode] = useState(
+    savedDashboardState?.chartMode || "all"
+  );
+
+  const [selectedMachines, setSelectedMachines] = useState(
+    Array.isArray(savedDashboardState?.selectedMachines)
+      ? savedDashboardState.selectedMachines
+      : null
+  );
+
+  const [selectedLogMachine, setSelectedLogMachine] = useState(
+    savedDashboardState?.selectedLogMachine || null
+  );
+
+  const [actionMenuOpen, setActionMenuOpen] = useState(
+    Boolean(savedDashboardState?.actionMenuOpen)
+  );
+
+  const [warningLogOpen, setWarningLogOpen] = useState(
+    Boolean(savedDashboardState?.warningLogOpen)
+  );
   const [loading, setLoading] = useState(false);
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
+  const dashboardStateRef = useRef({
+    chartOpen: false,
+    chartMode: "all",
+    selectedMachines: null,
+    actionMenuOpen: false,
+    warningLogOpen: false,
+    settingOpen: false,
+    selectedSettingMachine: null,
+    selectedLogMachine: null,
+  });
   useEffect(() => {
-  const reloadTimer = window.setTimeout(() => {
-    window.location.reload();
-  }, 10 * 60 * 1000); // 10 phút
-
-  return () => {
-    window.clearTimeout(reloadTimer);
-  };
-}, []);
+    dashboardStateRef.current = {
+      chartOpen,
+      chartMode,
+      selectedMachines,
+      actionMenuOpen,
+      warningLogOpen,
+      settingOpen,
+      selectedSettingMachine,
+      selectedLogMachine,
+    };
+  }, [
+    chartOpen,
+    chartMode,
+    selectedMachines,
+    actionMenuOpen,
+    warningLogOpen,
+    settingOpen,
+    selectedSettingMachine,
+    selectedLogMachine,
+  ]);
   useEffect(() => {
     if (!defaultOpenChart) return;
     if (machineIds.length === 0) return;
@@ -175,9 +242,13 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
 
     hasOpenedChartFromRoute.current = true;
 
-    setChartMode("all");
-    setSelectedMachines(machineIds);
-  }, [defaultOpenChart, machineIds]);
+    setChartMode((prev) => savedDashboardState?.chartMode || prev || "all");
+
+    setSelectedMachines((prev) => {
+      if (Array.isArray(prev)) return prev;
+      return machineIds;
+    });
+  }, [defaultOpenChart, machineIds, savedDashboardState]);
 
   const loadOutdoorWeather = async () => {
     try {
@@ -227,10 +298,46 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
   };
 
   useEffect(() => {
-    let alive = true;
-    let running = false;
+  let alive = true;
+  let running = false;
 
-    const loadAllDashboardData = async (showLoading = false) => {
+  const saveDashboardStateAndReload = () => {
+    if (!alive) return;
+
+    const currentState = dashboardStateRef.current;
+
+    try {
+      window.sessionStorage.setItem(
+        DASHBOARD_RESTORE_KEY,
+        JSON.stringify({
+          chartOpen: currentState.chartOpen,
+          chartMode: currentState.chartMode,
+          selectedMachines: currentState.selectedMachines,
+          actionMenuOpen: currentState.actionMenuOpen,
+          warningLogOpen: currentState.warningLogOpen,
+          settingOpen: currentState.settingOpen,
+          selectedSettingMachine: currentState.selectedSettingMachine,
+          selectedLogMachine: currentState.selectedLogMachine,
+        })
+      );
+    } catch (error) {
+      console.warn("Failed to save dashboard restore state:", error);
+    }
+
+    window.location.reload();
+  };
+
+  const resetAutoReloadTimer = () => {
+    if (autoReloadTimerRef.current) {
+      clearTimeout(autoReloadTimerRef.current);
+    }
+
+    autoReloadTimerRef.current = setTimeout(() => {
+      saveDashboardStateAndReload();
+    }, DASHBOARD_AUTO_RELOAD_MS);
+  };
+
+  const loadAllDashboardData = async (showLoading = false) => {
       if (running) return;
 
       running = true;
@@ -247,18 +354,67 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
 
     loadAllDashboardData(true);
 
+    // Refresh data dashboard mỗi 10s, không reload trang
     const dashboardTimer = setInterval(() => {
       if (!alive) return;
 
       loadAllDashboardData(false);
-    }, 10000);
+    }, DASHBOARD_REFRESH_MS);
+
+    // Bắt đầu đếm 10 phút không thao tác
+    resetAutoReloadTimer();
+
+    // Người dùng thao tác thì reset lại bộ đếm 10 phút
+    const userEvents = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "touchstart",
+      "wheel",
+      "scroll",
+    ];
+
+    userEvents.forEach((eventName) => {
+      window.addEventListener(eventName, resetAutoReloadTimer, {
+        passive: true,
+      });
+    });
 
     return () => {
       alive = false;
+
       clearInterval(dashboardTimer);
+
+      if (autoReloadTimerRef.current) {
+        clearTimeout(autoReloadTimerRef.current);
+      }
+
+      userEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, resetAutoReloadTimer);
+      });
     };
   }, []);
+  useEffect(() => {
+    const restoreMachineSetting = async () => {
+      if (!settingOpen || !selectedSettingMachine?.id) return;
+      if (machineSetting) return;
 
+      try {
+        const res = await temperatureHumidityApi.getThresholdSetting(
+          selectedSettingMachine.id
+        );
+
+        setMachineSetting(res.data || null);
+      } catch (error) {
+        console.error("Failed to restore machine setting:", error);
+        setSettingOpen(false);
+        setSelectedSettingMachine(null);
+        setMachineSetting(null);
+      }
+    };
+
+    restoreMachineSetting();
+  }, [settingOpen, selectedSettingMachine, machineSetting]);
   const summary = useMemo(() => {
     const result = {
       normal: 0,

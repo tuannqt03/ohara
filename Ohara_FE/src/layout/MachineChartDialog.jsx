@@ -12,12 +12,13 @@ import {
   IconButton,
   CircularProgress,
 } from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
+import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
 import * as echarts from "echarts";
 
 import { temperatureHumidityApi } from "../config/api";
 import ChartToolbar, { CHART_OPTIONS } from "./ChartToolbar";
-
+const DEFAULT_SAMPLE_TIME = 10;
+const DISCONNECTED_LIMIT_SECONDS = 20;
 const DEFAULT_TIME_OPTIONS = [
   { value: 10, label: "10s" },
   { value: 30, label: "30s" },
@@ -189,7 +190,6 @@ export default function MachineChartDialog({
   const [settingOpen, setSettingOpen] = useState(false);
   const [xAxisDomain, setXAxisDomain] = useState(null);
   const [yZoomRange, setYZoomRange] = useState(null);
-  
 
   const [chartAxisSettings, setChartAxisSettings] = useState(
     savedChartState.chartAxisSettings || DEFAULT_CHART_AXIS_SETTINGS
@@ -202,8 +202,7 @@ export default function MachineChartDialog({
     }, {});
   }, [machines]);
 
-  const noDataLimitSeconds = Number(timeRange || 10) * 2;
-  const isCustomTimeRange = Boolean(selectedStartTime && selectedEndTime);
+  const noDataLimitSeconds = DISCONNECTED_LIMIT_SECONDS;
 
   useEffect(() => {
     if (!open) return;
@@ -421,15 +420,16 @@ export default function MachineChartDialog({
           }
         }
 
-        if (savedChartState.timeRange) {
-          nextTimeRange = savedChartState.timeRange;
+        const latestSavedChartState = loadSavedChartState();
+
+        if (latestSavedChartState.timeRange) {
+          nextTimeRange = latestSavedChartState.timeRange;
         }
 
-        const savedStartTime = savedChartState.selectedStartTime;
-        const savedEndTime = savedChartState.selectedEndTime;
+        const savedStartTime = latestSavedChartState.selectedStartTime;
+        const savedEndTime = latestSavedChartState.selectedEndTime;
         const hasSavedCustomRange =
           savedStartTime && savedEndTime && savedStartTime < savedEndTime;
-
         setTimeOptions(nextTimeOptions);
         setTimeRange(nextTimeRange);
 
@@ -461,25 +461,23 @@ export default function MachineChartDialog({
     };
 
     initChart();
-  }, [open, chartInitialized, loadChartData, savedChartState]);
+  }, [open, chartInitialized, loadChartData]);
 
   useEffect(() => {
-    // Chỉ auto update khi đang realtime 100 điểm.
-    // Khi đã chọn Time Range thủ công thì chart đứng yên.
-    if (
-      !open ||
-      !chartInitialized ||
-      !realtimeMode ||
-      settingOpen ||
-      isCustomTimeRange
-    ) {
+    if (!open || !chartInitialized || settingOpen) {
       return;
     }
 
-    const reloadMs = Math.max(Number(timeRange || 10), 5) * 1000;
+    // Chỉ realtime mới tự reload theo sample step 10s/30s/60s
+    if (!realtimeMode) {
+      return;
+    }
+
+    const safeTimeRange = Number(timeRange) || DEFAULT_SAMPLE_TIME;
+    const reloadMs = safeTimeRange * 1000;
 
     const timer = window.setInterval(() => {
-      loadChartData(timeRange, false, null, null);
+      loadChartData(safeTimeRange, false, null, null);
     }, reloadMs);
 
     return () => {
@@ -488,10 +486,9 @@ export default function MachineChartDialog({
   }, [
     open,
     chartInitialized,
-    timeRange,
-    realtimeMode,
     settingOpen,
-    isCustomTimeRange,
+    realtimeMode,
+    timeRange,
     loadChartData,
   ]);
   const disconnectedMachineIds = useMemo(() => {
@@ -683,22 +680,64 @@ export default function MachineChartDialog({
   );
 
   const resetToRealtime = useCallback(
-  async (nextTimeRange = timeRange) => {
-    setRealtimeMode(true);
-    setSelectedStartTime(null);
-    setSelectedEndTime(null);
-    setXAxisDomain(null);
-    setYZoomRange(null);
+    async (nextTimeRange = DEFAULT_SAMPLE_TIME) => {
+      setTimeRange(nextTimeRange);
+      setRealtimeMode(true);
+      setSelectedStartTime(null);
+      setSelectedEndTime(null);
+      setXAxisDomain(null);
+      setYZoomRange(null);
 
-    await loadChartData(nextTimeRange, true, null, null);
-  },
-  [loadChartData, timeRange]
-);
+      try {
+        window.localStorage.setItem(
+          CHART_STORAGE_KEY,
+          JSON.stringify({
+            visibleCharts,
+            timeRange: nextTimeRange,
+            selectedStartTime: null,
+            selectedEndTime: null,
+            chartAxisSettings,
+          })
+        );
+      } catch (error) {
+        console.warn("Failed to reset saved chart state:", error);
+      }
+
+      await loadChartData(nextTimeRange, true, null, null);
+    },
+    [loadChartData, visibleCharts, chartAxisSettings]
+  );
+const handleDialogClose = useCallback(() => {
+  setTimeRange(DEFAULT_SAMPLE_TIME);
+  setRealtimeMode(true);
+  setSelectedStartTime(null);
+  setSelectedEndTime(null);
+  setXAxisDomain(null);
+  setYZoomRange(null);
+  setSettingOpen(false);
+
+  try {
+    window.localStorage.setItem(
+      CHART_STORAGE_KEY,
+      JSON.stringify({
+        visibleCharts,
+        timeRange: DEFAULT_SAMPLE_TIME,
+        selectedStartTime: null,
+        selectedEndTime: null,
+        chartAxisSettings,
+      })
+    );
+  } catch (error) {
+    console.warn("Failed to reset saved chart state:", error);
+  }
+
+  onClose?.();
+}, [onClose, visibleCharts, chartAxisSettings]);
 
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={handleDialogClose}
       maxWidth={false}
       slotProps={{
         paper: {
@@ -733,9 +772,32 @@ export default function MachineChartDialog({
       >
         {title}
 
-        <IconButton onClick={onClose} sx={{ color: colors.white }}>
-          <CloseIcon />
-        </IconButton>
+        <Button
+          onClick={handleDialogClose}
+          startIcon={<HomeRoundedIcon />}
+          sx={{
+            height: 38,
+            px: 1.6,
+            borderRadius: 2,
+            bgcolor: colors.white,
+            color: colors.teal,
+            fontFamily,
+            fontSize: 13,
+            fontWeight: 900,
+            textTransform: "none",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.16)",
+            "& .MuiButton-startIcon": {
+              mr: 0.75,
+            },
+            "&:hover": {
+              bgcolor: "#e5e7eb",
+              boxShadow: "0 3px 10px rgba(0,0,0,0.18)",
+              transform: "translateY(-1px)",
+            },
+          }}
+        >
+          Home
+        </Button>
       </DialogTitle>
 
       <DialogContent
