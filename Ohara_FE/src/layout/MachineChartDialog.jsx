@@ -91,17 +91,12 @@ const loadSavedChartState = () => {
         )
       : null;
 
-    const selectedStartTime = parseSavedDate(parsed.selectedStartTime);
-    const selectedEndTime = parseSavedDate(parsed.selectedEndTime);
-    const hasValidRange =
-      selectedStartTime && selectedEndTime && selectedStartTime < selectedEndTime;
-
     return {
       visibleCharts:
-        visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
-      timeRange: Number(parsed.timeRange) || null,
-      selectedStartTime: hasValidRange ? selectedStartTime : null,
-      selectedEndTime: hasValidRange ? selectedEndTime : null,
+      visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+      timeRange: null,
+      selectedStartTime: null,
+      selectedEndTime: null,
       chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
     };
   } catch (error) {
@@ -146,6 +141,22 @@ const getMachineDisplayName = (machine) => {
 
   return machine.code ? `${machine.name}_${machine.code}` : machine.name;
 };
+
+const formatTooltipDateTime = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds()
+  )}`;
+};
+
+const DISCONNECTED_TOOLTIP_VALUE = -999999;
 export default function MachineChartDialog({
   open,
   onClose,
@@ -167,7 +178,7 @@ export default function MachineChartDialog({
       : DEFAULT_VISIBLE_CHARTS
   );
 
-  const [timeRange, setTimeRange] = useState(savedChartState.timeRange || 10);
+  const [timeRange, setTimeRange] = useState(DEFAULT_SAMPLE_TIME);
   const [timeOptions, setTimeOptions] = useState(DEFAULT_TIME_OPTIONS);
 
   const [history, setHistory] = useState([]);
@@ -177,16 +188,10 @@ export default function MachineChartDialog({
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [latestMachineMap, setLatestMachineMap] = useState({});
 
-  const [selectedStartTime, setSelectedStartTime] = useState(
-    savedChartState.selectedStartTime || null
-  );
-  const [selectedEndTime, setSelectedEndTime] = useState(
-    savedChartState.selectedEndTime || null
-  );
+  const [selectedStartTime, setSelectedStartTime] = useState(null);
+  const [selectedEndTime, setSelectedEndTime] = useState(null);
 
-  const [realtimeMode, setRealtimeMode] = useState(
-    !(savedChartState.selectedStartTime && savedChartState.selectedEndTime)
-  );
+  const [realtimeMode, setRealtimeMode] = useState(true);
   const [settingOpen, setSettingOpen] = useState(false);
   const [xAxisDomain, setXAxisDomain] = useState(null);
   const [yZoomRange, setYZoomRange] = useState(null);
@@ -1277,12 +1282,13 @@ function ChartBox({
   const yScale = Number(axisSetting?.scale ?? 10);
 
   const option = useMemo(() => {
-    const series = safeSelectedMachines.map((id) => {
+    const valueSeries = safeSelectedMachines.map((id) => {
       const color = machineColors[(id - 1) % machineColors.length];
 
       return {
         name: machineNameMap?.[id] || `Machine ${id}`,
         type: "line",
+        disconnectedHelper: false,
 
         // dot
         showSymbol: false,
@@ -1325,6 +1331,43 @@ function ChartBox({
       };
     });
 
+    const disconnectedSeries = safeSelectedMachines.map((id) => ({
+      id: `disconnected_${dataPrefix}_${id}`,
+      name: machineNameMap?.[id] || `Machine ${id}`,
+      type: "line",
+      isDisconnectedHelper: true,
+      showSymbol: true,
+      showAllSymbol: true,
+      symbol: "circle",
+      symbolSize: 18,
+      animation: false,
+      connectNulls: false,
+      silent: false,
+      tooltip: {
+        show: true,
+      },
+      lineStyle: {
+        opacity: 0,
+        width: 0,
+      },
+      itemStyle: {
+        opacity: 0,
+      },
+      emphasis: {
+        disabled: true,
+      },
+      data: safeData.map((row) => ({
+        value: [
+          row.xTs,
+          row[`isDisconnected_${id}`] ? DISCONNECTED_TOOLTIP_VALUE : null,
+        ],
+        isDisconnected: Boolean(row[`isDisconnected_${id}`]),
+        machineName: machineNameMap?.[id] || `Machine ${id}`,
+      })),
+    }));
+
+    const series = [...valueSeries, ...disconnectedSeries];
+
     return {
       animation: false,
       useUTC: false,
@@ -1364,25 +1407,33 @@ function ChartBox({
           if (!Array.isArray(params) || params.length === 0) return "";
 
           const timeValue = params[0]?.value?.[0];
-          const time = new Date(timeValue);
-          const pad = (n) => String(n).padStart(2, "0");
-          const timeText = Number.isNaN(time.getTime())
-            ? ""
-            : `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(
-                time.getDate()
-              )} ${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(
-                time.getSeconds()
-              )}`;
+          const timeText = formatTooltipDateTime(timeValue);
 
-          const rows = params
+          const isDisconnectedParam = (p) =>
+            p?.data?.isDisconnected === true ||
+            p?.seriesOption?.isDisconnectedHelper === true ||
+            String(p?.seriesId || "").startsWith("disconnected_") ||
+            p?.value?.[1] === DISCONNECTED_TOOLTIP_VALUE;
+
+          const disconnectedRows = params
+            .filter((p) => isDisconnectedParam(p))
+            .map((p) => {
+              const machineName = p?.data?.machineName || p.seriesName;
+
+              return `${p.marker}${machineName}: <b>Disconnected</b>`;
+            });
+
+          const valueRows = params
             .filter(
               (p) =>
+                !isDisconnectedParam(p) &&
                 p.value?.[1] !== null &&
                 p.value?.[1] !== undefined &&
                 p.value?.[1] !== ""
             )
-            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`)
-            .join("<br/>");
+            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`);
+
+          const rows = [...valueRows, ...disconnectedRows].join("<br/>");
 
           return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
         },
