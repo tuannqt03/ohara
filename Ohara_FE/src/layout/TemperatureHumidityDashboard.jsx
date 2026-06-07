@@ -305,19 +305,65 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
     if (!alive) return;
 
     const currentState = dashboardStateRef.current;
+    const chartStorageKey = "temperatureHumidityChartStateV1";
 
     try {
+      const rawChartState = window.localStorage.getItem(chartStorageKey);
+      const savedChartState = rawChartState ? JSON.parse(rawChartState) : {};
+
+      const savedVisibleCharts =
+        Array.isArray(savedChartState.visibleCharts) &&
+        savedChartState.visibleCharts.length > 0
+          ? savedChartState.visibleCharts
+          : ["moldTemp", "envTemp", "hum"];
+
+      const savedChartAxisSettings =
+        savedChartState.chartAxisSettings &&
+        typeof savedChartState.chartAxisSettings === "object"
+          ? savedChartState.chartAxisSettings
+          : {
+              moldTemp: {
+                min: 0,
+                max: 120,
+                scale: 20,
+              },
+              envTemp: {
+                min: 0,
+                max: 60,
+                scale: 10,
+              },
+              hum: {
+                min: 0,
+                max: 100,
+                scale: 20,
+              },
+            };
+
+      // Auto reload chỉ reset thời gian về realtime.
+      // Vẫn giữ loại biểu đồ đang chọn và setting trục Y.
+      window.localStorage.setItem(
+        chartStorageKey,
+        JSON.stringify({
+          visibleCharts: savedVisibleCharts,
+          timeRange: 10,
+          selectedStartTime: null,
+          selectedEndTime: null,
+          chartAxisSettings: savedChartAxisSettings,
+        })
+      );
+
       window.sessionStorage.setItem(
         DASHBOARD_RESTORE_KEY,
         JSON.stringify({
           chartOpen: currentState.chartOpen,
           chartMode: currentState.chartMode,
           selectedMachines: currentState.selectedMachines,
-          actionMenuOpen: currentState.actionMenuOpen,
-          warningLogOpen: currentState.warningLogOpen,
-          settingOpen: currentState.settingOpen,
-          selectedSettingMachine: currentState.selectedSettingMachine,
-          selectedLogMachine: currentState.selectedLogMachine,
+
+          actionMenuOpen: false,
+          warningLogOpen: false,
+          settingOpen: false,
+          selectedSettingMachine: null,
+          selectedLogMachine: null,
         })
       );
     } catch (error) {
