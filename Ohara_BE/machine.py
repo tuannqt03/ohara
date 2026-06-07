@@ -549,9 +549,11 @@ def get_chart_data():
                 item[f"hum_{machine_id}"] = latest_row["humidity"]
                 item[f"isDisconnected_{machine_id}"] = False
             else:
-                item[f"moldTemp_{machine_id}"] = 0
-                item[f"temp_{machine_id}"] = 0
-                item[f"hum_{machine_id}"] = 0
+                # Máy mất kết nối thì trả None để biểu đồ đứt đoạn,
+                # không trả 0 vì sẽ làm line tụt xuống 0.
+                item[f"moldTemp_{machine_id}"] = None
+                item[f"temp_{machine_id}"] = None
+                item[f"hum_{machine_id}"] = None
                 item[f"isDisconnected_{machine_id}"] = True
 
         result.append(item)
