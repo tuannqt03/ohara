@@ -48,14 +48,6 @@ const DEFAULT_CHART_AXIS_SETTINGS = {
   },
 };
 
-const parseSavedDate = (value) => {
-  if (value === null || value === undefined || value === "") return null;
-
-  const date = new Date(Number(value));
-  if (Number.isNaN(date.getTime())) return null;
-
-  return date;
-};
 
 const normalizeAxisSettings = (settings) => {
   if (!settings || typeof settings !== "object") {
@@ -91,17 +83,9 @@ const loadSavedChartState = () => {
         )
       : null;
 
-    const selectedStartTime = parseSavedDate(parsed.selectedStartTime);
-    const selectedEndTime = parseSavedDate(parsed.selectedEndTime);
-    const hasValidRange =
-      selectedStartTime && selectedEndTime && selectedStartTime < selectedEndTime;
-
     return {
       visibleCharts:
         visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
-      timeRange: Number(parsed.timeRange) || null,
-      selectedStartTime: hasValidRange ? selectedStartTime : null,
-      selectedEndTime: hasValidRange ? selectedEndTime : null,
       chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
     };
   } catch (error) {
@@ -167,7 +151,7 @@ export default function MachineChartDialog({
       : DEFAULT_VISIBLE_CHARTS
   );
 
-  const [timeRange, setTimeRange] = useState(savedChartState.timeRange || 10);
+  const [timeRange, setTimeRange] = useState(DEFAULT_SAMPLE_TIME);
   const [timeOptions, setTimeOptions] = useState(DEFAULT_TIME_OPTIONS);
 
   const [history, setHistory] = useState([]);
@@ -177,16 +161,10 @@ export default function MachineChartDialog({
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [latestMachineMap, setLatestMachineMap] = useState({});
 
-  const [selectedStartTime, setSelectedStartTime] = useState(
-    savedChartState.selectedStartTime || null
-  );
-  const [selectedEndTime, setSelectedEndTime] = useState(
-    savedChartState.selectedEndTime || null
-  );
+  const [selectedStartTime, setSelectedStartTime] = useState(null);
+  const [selectedEndTime, setSelectedEndTime] = useState(null);
 
-  const [realtimeMode, setRealtimeMode] = useState(
-    !(savedChartState.selectedStartTime && savedChartState.selectedEndTime)
-  );
+  const [realtimeMode, setRealtimeMode] = useState(true);
   const [settingOpen, setSettingOpen] = useState(false);
   const [xAxisDomain, setXAxisDomain] = useState(null);
   const [yZoomRange, setYZoomRange] = useState(null);
@@ -205,32 +183,20 @@ export default function MachineChartDialog({
   const noDataLimitSeconds = DISCONNECTED_LIMIT_SECONDS;
 
   useEffect(() => {
-    if (!open) return;
+  if (!open) return;
 
-    try {
-      window.localStorage.setItem(
-        CHART_STORAGE_KEY,
-        JSON.stringify({
-          visibleCharts,
-          timeRange,
-          selectedStartTime: selectedStartTime
-            ? selectedStartTime.getTime()
-            : null,
-          selectedEndTime: selectedEndTime ? selectedEndTime.getTime() : null,
-          chartAxisSettings,
-        })
-      );
-    } catch (error) {
-      console.warn("Failed to save chart state:", error);
-    }
-  }, [
-    open,
-    visibleCharts,
-    timeRange,
-    selectedStartTime,
-    selectedEndTime,
-    chartAxisSettings,
-  ]);
+  try {
+    window.localStorage.setItem(
+      CHART_STORAGE_KEY,
+      JSON.stringify({
+        visibleCharts,
+        chartAxisSettings,
+      })
+    );
+  } catch (error) {
+    console.warn("Failed to save chart state:", error);
+  }
+}, [open, visibleCharts, chartAxisSettings]);
 
   const loadLatestMachines = useCallback(async () => {
     try {
@@ -420,32 +386,14 @@ export default function MachineChartDialog({
           }
         }
 
-        const latestSavedChartState = loadSavedChartState();
-
-        if (latestSavedChartState.timeRange) {
-          nextTimeRange = latestSavedChartState.timeRange;
-        }
-
-        const savedStartTime = latestSavedChartState.selectedStartTime;
-        const savedEndTime = latestSavedChartState.selectedEndTime;
-        const hasSavedCustomRange =
-          savedStartTime && savedEndTime && savedStartTime < savedEndTime;
         setTimeOptions(nextTimeOptions);
         setTimeRange(nextTimeRange);
 
-        if (hasSavedCustomRange) {
-          setSelectedStartTime(savedStartTime);
-          setSelectedEndTime(savedEndTime);
-          setRealtimeMode(false);
+        setSelectedStartTime(null);
+        setSelectedEndTime(null);
+        setRealtimeMode(true);
 
-          await loadChartData(nextTimeRange, true, savedStartTime, savedEndTime);
-        } else {
-          setSelectedStartTime(null);
-          setSelectedEndTime(null);
-          setRealtimeMode(true);
-
-          await loadChartData(nextTimeRange, true, null, null);
-        }
+        await loadChartData(nextTimeRange, true, null, null);
 
         setChartInitialized(true);
       } catch (error) {
@@ -693,9 +641,6 @@ export default function MachineChartDialog({
           CHART_STORAGE_KEY,
           JSON.stringify({
             visibleCharts,
-            timeRange: nextTimeRange,
-            selectedStartTime: null,
-            selectedEndTime: null,
             chartAxisSettings,
           })
         );
@@ -721,9 +666,6 @@ const handleDialogClose = useCallback(() => {
       CHART_STORAGE_KEY,
       JSON.stringify({
         visibleCharts,
-        timeRange: DEFAULT_SAMPLE_TIME,
-        selectedStartTime: null,
-        selectedEndTime: null,
         chartAxisSettings,
       })
     );
