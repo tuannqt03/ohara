@@ -91,12 +91,17 @@ const loadSavedChartState = () => {
         )
       : null;
 
+    const selectedStartTime = parseSavedDate(parsed.selectedStartTime);
+    const selectedEndTime = parseSavedDate(parsed.selectedEndTime);
+    const hasValidRange =
+      selectedStartTime && selectedEndTime && selectedStartTime < selectedEndTime;
+
     return {
       visibleCharts:
-      visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
-      timeRange: null,
-      selectedStartTime: null,
-      selectedEndTime: null,
+        visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+      timeRange: Number(parsed.timeRange) || null,
+      selectedStartTime: hasValidRange ? selectedStartTime : null,
+      selectedEndTime: hasValidRange ? selectedEndTime : null,
       chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
     };
   } catch (error) {
@@ -141,22 +146,6 @@ const getMachineDisplayName = (machine) => {
 
   return machine.code ? `${machine.name}_${machine.code}` : machine.name;
 };
-
-const formatTooltipDateTime = (value) => {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) return "";
-
-  const pad = (n) => String(n).padStart(2, "0");
-
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
-    date.getDate()
-  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
-    date.getSeconds()
-  )}`;
-};
-
-const DISCONNECTED_TOOLTIP_VALUE = -999999;
 export default function MachineChartDialog({
   open,
   onClose,
@@ -178,7 +167,7 @@ export default function MachineChartDialog({
       : DEFAULT_VISIBLE_CHARTS
   );
 
-  const [timeRange, setTimeRange] = useState(DEFAULT_SAMPLE_TIME);
+  const [timeRange, setTimeRange] = useState(savedChartState.timeRange || 10);
   const [timeOptions, setTimeOptions] = useState(DEFAULT_TIME_OPTIONS);
 
   const [history, setHistory] = useState([]);
@@ -188,10 +177,16 @@ export default function MachineChartDialog({
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [latestMachineMap, setLatestMachineMap] = useState({});
 
-  const [selectedStartTime, setSelectedStartTime] = useState(null);
-  const [selectedEndTime, setSelectedEndTime] = useState(null);
+  const [selectedStartTime, setSelectedStartTime] = useState(
+    savedChartState.selectedStartTime || null
+  );
+  const [selectedEndTime, setSelectedEndTime] = useState(
+    savedChartState.selectedEndTime || null
+  );
 
-  const [realtimeMode, setRealtimeMode] = useState(true);
+  const [realtimeMode, setRealtimeMode] = useState(
+    !(savedChartState.selectedStartTime && savedChartState.selectedEndTime)
+  );
   const [settingOpen, setSettingOpen] = useState(false);
   const [xAxisDomain, setXAxisDomain] = useState(null);
   const [yZoomRange, setYZoomRange] = useState(null);
@@ -1282,13 +1277,12 @@ function ChartBox({
   const yScale = Number(axisSetting?.scale ?? 10);
 
   const option = useMemo(() => {
-    const valueSeries = safeSelectedMachines.map((id) => {
+    const series = safeSelectedMachines.map((id) => {
       const color = machineColors[(id - 1) % machineColors.length];
 
       return {
         name: machineNameMap?.[id] || `Machine ${id}`,
         type: "line",
-        disconnectedHelper: false,
 
         // dot
         showSymbol: false,
@@ -1331,9 +1325,6 @@ function ChartBox({
       };
     });
 
-
-    const series = valueSeries;
-
     return {
       animation: false,
       useUTC: false,
@@ -1373,34 +1364,24 @@ function ChartBox({
           if (!Array.isArray(params) || params.length === 0) return "";
 
           const timeValue = params[0]?.value?.[0];
-          const timeText = formatTooltipDateTime(timeValue);
+          const time = new Date(timeValue);
+          const pad = (n) => String(n).padStart(2, "0");
+          const timeText = Number.isNaN(time.getTime())
+            ? ""
+            : `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(
+                time.getDate()
+              )} ${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(
+                time.getSeconds()
+              )}`;
 
-          const currentRow = safeData.find((row) => row.xTs === timeValue);
-
-          if (!currentRow) {
-            return `Time: <b>${timeText}</b>`;
-          }
-
-          const rows = safeSelectedMachines
-            .map((id) => {
-              const machineName = machineNameMap?.[id] || `Machine ${id}`;
-              const value = currentRow[`${dataPrefix}_${id}`];
-              const isDisconnected = Boolean(currentRow[`isDisconnected_${id}`]);
-              const color = machineColors[(id - 1) % machineColors.length];
-
-              const marker = `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
-
-              if (isDisconnected) {
-                return `${marker}${machineName}: <b>Disconnected</b>`;
-              }
-
-              if (value === null || value === undefined || value === "") {
-                return null;
-              }
-
-              return `${marker}${machineName}: <b>${value}</b>`;
-            })
-            .filter(Boolean)
+          const rows = params
+            .filter(
+              (p) =>
+                p.value?.[1] !== null &&
+                p.value?.[1] !== undefined &&
+                p.value?.[1] !== ""
+            )
+            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`)
             .join("<br/>");
 
           return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
