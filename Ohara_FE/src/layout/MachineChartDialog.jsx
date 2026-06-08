@@ -1331,42 +1331,8 @@ function ChartBox({
       };
     });
 
-    const disconnectedSeries = safeSelectedMachines.map((id) => ({
-      id: `disconnected_${dataPrefix}_${id}`,
-      name: machineNameMap?.[id] || `Machine ${id}`,
-      type: "line",
-      isDisconnectedHelper: true,
-      showSymbol: true,
-      showAllSymbol: true,
-      symbol: "circle",
-      symbolSize: 18,
-      animation: false,
-      connectNulls: false,
-      silent: false,
-      tooltip: {
-        show: true,
-      },
-      lineStyle: {
-        opacity: 0,
-        width: 0,
-      },
-      itemStyle: {
-        opacity: 0,
-      },
-      emphasis: {
-        disabled: true,
-      },
-      data: safeData.map((row) => ({
-        value: [
-          row.xTs,
-          row[`isDisconnected_${id}`] ? DISCONNECTED_TOOLTIP_VALUE : null,
-        ],
-        isDisconnected: Boolean(row[`isDisconnected_${id}`]),
-        machineName: machineNameMap?.[id] || `Machine ${id}`,
-      })),
-    }));
 
-    const series = [...valueSeries, ...disconnectedSeries];
+    const series = valueSeries;
 
     return {
       animation: false,
@@ -1409,31 +1375,33 @@ function ChartBox({
           const timeValue = params[0]?.value?.[0];
           const timeText = formatTooltipDateTime(timeValue);
 
-          const isDisconnectedParam = (p) =>
-            p?.data?.isDisconnected === true ||
-            p?.seriesOption?.isDisconnectedHelper === true ||
-            String(p?.seriesId || "").startsWith("disconnected_") ||
-            p?.value?.[1] === DISCONNECTED_TOOLTIP_VALUE;
+          const currentRow = safeData.find((row) => row.xTs === timeValue);
 
-          const disconnectedRows = params
-            .filter((p) => isDisconnectedParam(p))
-            .map((p) => {
-              const machineName = p?.data?.machineName || p.seriesName;
+          if (!currentRow) {
+            return `Time: <b>${timeText}</b>`;
+          }
 
-              return `${p.marker}${machineName}: <b>Disconnected</b>`;
-            });
+          const rows = safeSelectedMachines
+            .map((id) => {
+              const machineName = machineNameMap?.[id] || `Machine ${id}`;
+              const value = currentRow[`${dataPrefix}_${id}`];
+              const isDisconnected = Boolean(currentRow[`isDisconnected_${id}`]);
+              const color = machineColors[(id - 1) % machineColors.length];
 
-          const valueRows = params
-            .filter(
-              (p) =>
-                !isDisconnectedParam(p) &&
-                p.value?.[1] !== null &&
-                p.value?.[1] !== undefined &&
-                p.value?.[1] !== ""
-            )
-            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`);
+              const marker = `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
 
-          const rows = [...valueRows, ...disconnectedRows].join("<br/>");
+              if (isDisconnected) {
+                return `${marker}${machineName}: <b>Disconnected</b>`;
+              }
+
+              if (value === null || value === undefined || value === "") {
+                return null;
+              }
+
+              return `${marker}${machineName}: <b>${value}</b>`;
+            })
+            .filter(Boolean)
+            .join("<br/>");
 
           return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
         },
