@@ -59,7 +59,7 @@ const MACHINE_COLORS = [
 ];
 const DASHBOARD_REFRESH_MS = 10 * 1000;
 
-const DASHBOARD_AUTO_RELOAD_MS = 30 * 60 * 1000;
+const DASHBOARD_AUTO_RELOAD_MS = 10 * 60 * 1000;
 
 const DASHBOARD_RESTORE_KEY = "temperatureHumidityDashboardRestoreV1";
 const statusStyle = {

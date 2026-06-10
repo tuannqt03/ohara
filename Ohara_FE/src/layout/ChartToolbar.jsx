@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Box,
   Paper,
@@ -99,7 +100,19 @@ export default function ChartToolbar({
   );
 
   const [draftAxisSettings, setDraftAxisSettings] = useState(chartAxisSettings);
+  const waitNextTick = () =>
+  new Promise((resolve) => window.setTimeout(resolve, 0));
 
+  const closePopoverBeforeLoading = async (action) => {
+    flushSync(() => {
+      setSettingAnchorEl(null);
+    });
+
+    await onSettingOpenChange?.(false, action);
+
+    // Cho browser render trạng thái popup đã đóng trước khi loading bật
+    await waitNextTick();
+  };
  useEffect(() => {
   if (!openSetting) return;
 
@@ -128,8 +141,12 @@ export default function ChartToolbar({
 ]);
 
   useEffect(() => {
-    setDraftAxisSettings(chartAxisSettings);
-  }, [chartAxisSettings]);
+    if (!openSetting) return;
+
+    setDraftAxisSettings(
+      JSON.parse(JSON.stringify(chartAxisSettings || {}))
+    );
+  }, [openSetting, chartAxisSettings]);
 
   const handleToggleAll = () => {
     if (isAllChecked) {
@@ -173,17 +190,17 @@ export default function ChartToolbar({
         !Number.isFinite(max) ||
         !Number.isFinite(scale)
       ) {
-        alert(`${chart.shortLabel}: Min, Max, Scale phải là số`);
+        alert(`${chart.shortLabel}: Min, Max, and Scale must be numbers`);
         return false;
       }
 
       if (max <= min) {
-        alert(`${chart.shortLabel}: Max phải lớn hơn Min`);
+        alert(`${chart.shortLabel}: Max must be greater than Min`);
         return false;
       }
 
       if (scale <= 0) {
-        alert(`${chart.shortLabel}: Scale phải lớn hơn 0`);
+        alert(`${chart.shortLabel}: Scale must be greater than 0`);
         return false;
       }
     }
@@ -193,31 +210,28 @@ export default function ChartToolbar({
   };
 
   const handleApplySettings = async () => {
-  const isAxisValid = applyAxisSettings();
-  if (!isAxisValid) return;
+    const isAxisValid = applyAxisSettings();
+    if (!isAxisValid) return;
 
-  console.log("CLICK APPLY TOOLBAR", {
-    draftStartDate,
-    draftStartTime,
-    draftEndDate,
-    draftEndTime,
-  });
-  setSettingAnchorEl(null);
-  onSettingOpenChange?.(false, "apply");
+    if (openSettingSection === "axis") {
+      await closePopoverBeforeLoading("axisApply");
+      return;
+    }
 
-  await new Promise((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(resolve);
-    });
-  });
+    const didApplyTimeRange = await onDateTimeRangeChange(
+      draftStartDate,
+      draftStartTime,
+      draftEndDate,
+      draftEndTime,
+      {
+        beforeLoad: () => closePopoverBeforeLoading("timeApply"),
+      }
+    );
 
-  await onDateTimeRangeChange(
-    draftStartDate,
-    draftStartTime,
-    draftEndDate,
-    draftEndTime
-  );
-};
+    if (didApplyTimeRange === false) {
+      return;
+    }
+  };
   const handleResetTimeRange = async () => {
     await onResetTimeRange?.();
   };

@@ -25,6 +25,97 @@ const DEFAULT_TIME_OPTIONS = [
   { value: 60, label: "60s" },
 ];
 
+const RANGE_TIME_OPTIONS = {
+  under5Days: DEFAULT_TIME_OPTIONS,
+  under10Days: [{ value: 60, label: "1m" }],
+  under30Days: [{ value: 300, label: "5m" }],
+  under3Months: [{ value: 600, label: "10m" }],
+  under1Year: [{ value: 3600, label: "60m" }],
+};
+
+const MAX_CUSTOM_RANGE_DAYS = 365;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+const getSampleTimePolicyByRange = (startTime, endTime) => {
+  if (!startTime || !endTime) {
+    return {
+      blocked: false,
+      options: DEFAULT_TIME_OPTIONS,
+      defaultValue: DEFAULT_SAMPLE_TIME,
+    };
+  }
+
+  const rangeDays = (endTime.getTime() - startTime.getTime()) / MS_PER_DAY;
+
+  if (rangeDays > MAX_CUSTOM_RANGE_DAYS) {
+    return {
+      blocked: true,
+      message:
+        "The selected time range is longer than 1 year. Please choose a range of 1 year or less to avoid heavy data loading.",
+      rangeDays,
+    };
+  }
+
+  if (rangeDays <= 5) {
+    return {
+      blocked: false,
+      options: RANGE_TIME_OPTIONS.under5Days,
+      defaultValue: DEFAULT_SAMPLE_TIME,
+      rangeDays,
+    };
+  }
+
+  if (rangeDays <= 10) {
+    return {
+      blocked: false,
+      options: RANGE_TIME_OPTIONS.under10Days,
+      defaultValue: 60,
+      rangeDays,
+    };
+  }
+
+  if (rangeDays <= 30) {
+    return {
+      blocked: false,
+      options: RANGE_TIME_OPTIONS.under30Days,
+      defaultValue: 300,
+      rangeDays,
+    };
+  }
+
+  if (rangeDays <= 90) {
+    return {
+      blocked: false,
+      options: RANGE_TIME_OPTIONS.under3Months,
+      defaultValue: 600,
+      rangeDays,
+    };
+  }
+
+  return {
+    blocked: false,
+    options: RANGE_TIME_OPTIONS.under1Year,
+    defaultValue: 3600,
+    rangeDays,
+  };
+};
+
+const getSafeSampleTimeForPolicy = (currentValue, policy) => {
+  const normalizedValue = Number(currentValue);
+
+  if (policy.options.some((item) => Number(item.value) === normalizedValue)) {
+    return normalizedValue;
+  }
+
+  return policy.defaultValue;
+};
+
+const getSafeRealtimeSampleTime = (currentValue) =>
+  getSafeSampleTimeForPolicy(currentValue, {
+    options: DEFAULT_TIME_OPTIONS,
+    defaultValue: DEFAULT_SAMPLE_TIME,
+  });
+
 const DEFAULT_VISIBLE_POINTS = 100;
 const CHART_STORAGE_KEY = "temperatureHumidityChartStateV1";
 
@@ -48,6 +139,14 @@ const DEFAULT_CHART_AXIS_SETTINGS = {
   },
 };
 
+const parseSavedDate = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+
+  const date = new Date(Number(value));
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date;
+};
 
 const normalizeAxisSettings = (settings) => {
   if (!settings || typeof settings !== "object") {
@@ -85,7 +184,10 @@ const loadSavedChartState = () => {
 
     return {
       visibleCharts:
-        visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+      visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+      timeRange: null,
+      selectedStartTime: null,
+      selectedEndTime: null,
       chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
     };
   } catch (error) {
@@ -130,6 +232,22 @@ const getMachineDisplayName = (machine) => {
 
   return machine.code ? `${machine.name}_${machine.code}` : machine.name;
 };
+
+const formatTooltipDateTime = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  const pad = (n) => String(n).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds()
+  )}`;
+};
+
+const DISCONNECTED_TOOLTIP_VALUE = -999999;
 export default function MachineChartDialog({
   open,
   onClose,
@@ -144,6 +262,7 @@ export default function MachineChartDialog({
   fontFamily,
 }) {
   const savedChartState = useMemo(() => loadSavedChartState(), []);
+  const chartRequestRunningRef = useRef(false);
 
   const [visibleCharts, setVisibleCharts] = useState(
     Array.isArray(savedChartState.visibleCharts)
@@ -180,23 +299,38 @@ export default function MachineChartDialog({
     }, {});
   }, [machines]);
 
-  const noDataLimitSeconds = DISCONNECTED_LIMIT_SECONDS;
+  const noDataLimitSeconds = Math.max(
+    DISCONNECTED_LIMIT_SECONDS,
+    Number(timeRange || DEFAULT_SAMPLE_TIME) * 2
+  );
 
   useEffect(() => {
-  if (!open) return;
+    if (!open) return;
 
-  try {
-    window.localStorage.setItem(
-      CHART_STORAGE_KEY,
-      JSON.stringify({
-        visibleCharts,
-        chartAxisSettings,
-      })
-    );
-  } catch (error) {
-    console.warn("Failed to save chart state:", error);
-  }
-}, [open, visibleCharts, chartAxisSettings]);
+    try {
+      window.localStorage.setItem(
+        CHART_STORAGE_KEY,
+        JSON.stringify({
+          visibleCharts,
+          timeRange,
+          selectedStartTime: selectedStartTime
+            ? selectedStartTime.getTime()
+            : null,
+          selectedEndTime: selectedEndTime ? selectedEndTime.getTime() : null,
+          chartAxisSettings,
+        })
+      );
+    } catch (error) {
+      console.warn("Failed to save chart state:", error);
+    }
+  }, [
+    open,
+    visibleCharts,
+    timeRange,
+    selectedStartTime,
+    selectedEndTime,
+    chartAxisSettings,
+  ]);
 
   const loadLatestMachines = useCallback(async () => {
     try {
@@ -217,7 +351,7 @@ export default function MachineChartDialog({
       return {};
     }
   }, []);
-
+  
   const loadChartData = useCallback(
     async (
       interval,
@@ -273,11 +407,11 @@ export default function MachineChartDialog({
         let domainEndMs;
 
         if (isManualTimeWindow) {
-          // Khi Apply Start/End: giữ đúng khoảng user chọn
+          // When Apply Start/End: keep the user's selected range exactly
           domainStartMs = startTime.getTime();
           domainEndMs = endTime.getTime();
         } else {
-          // Realtime: lấy mốc dữ liệu mới nhất trong DB rồi lùi 100 step
+          // Realtime: take the latest data point in the DB and move back 100 steps
           const domainEndTime = latestDbDate || new Date();
 
           domainEndMs = domainEndTime.getTime();
@@ -292,14 +426,14 @@ export default function MachineChartDialog({
         let finalStartMs = domainStartMs;
         let finalEndMs = domainEndMs;
 
-        // Với realtime / nút lùi / nút tiến: cho trục X bám sát điểm dữ liệu thật
-        // để line không bị hở một đoạn so với trục Y.
+        // For realtime / back / next buttons: keep the X-axis aligned with the real data points
+        // so the line does not have a gap compared with the Y-axis.
         if (!isManualTimeWindow && nextHistory.length > 0) {
           finalStartMs = nextHistory[0].xTs;
           finalEndMs = nextHistory[nextHistory.length - 1].xTs;
         }
 
-        // Với nút lùi/tiến vẫn ép sát dữ liệu thật như cũ.
+        // For back/next buttons, still keep the data aligned as before.
         if (fitDataDomain && nextHistory.length > 0) {
           finalStartMs = nextHistory[0].xTs;
           finalEndMs = nextHistory[nextHistory.length - 1].xTs;
@@ -336,6 +470,7 @@ export default function MachineChartDialog({
 
   useEffect(() => {
     if (!open) {
+      chartRequestRunningRef.current = false;
       setChartInitialized(false);
       setHistory([]);
       setLastRefreshAt(null);
@@ -386,14 +521,32 @@ export default function MachineChartDialog({
           }
         }
 
+        const latestSavedChartState = loadSavedChartState();
+
+        if (latestSavedChartState.timeRange) {
+          nextTimeRange = latestSavedChartState.timeRange;
+        }
+
+        const savedStartTime = latestSavedChartState.selectedStartTime;
+        const savedEndTime = latestSavedChartState.selectedEndTime;
+        const hasSavedCustomRange =
+          savedStartTime && savedEndTime && savedStartTime < savedEndTime;
         setTimeOptions(nextTimeOptions);
         setTimeRange(nextTimeRange);
 
-        setSelectedStartTime(null);
-        setSelectedEndTime(null);
-        setRealtimeMode(true);
+        if (hasSavedCustomRange) {
+          setSelectedStartTime(savedStartTime);
+          setSelectedEndTime(savedEndTime);
+          setRealtimeMode(false);
 
-        await loadChartData(nextTimeRange, true, null, null);
+          await loadChartData(nextTimeRange, true, savedStartTime, savedEndTime);
+        } else {
+          setSelectedStartTime(null);
+          setSelectedEndTime(null);
+          setRealtimeMode(true);
+
+          await loadChartData(nextTimeRange, true, null, null);
+        }
 
         setChartInitialized(true);
       } catch (error) {
@@ -412,33 +565,43 @@ export default function MachineChartDialog({
   }, [open, chartInitialized, loadChartData]);
 
   useEffect(() => {
-    if (!open || !chartInitialized || settingOpen) {
+  if (!open || !chartInitialized || settingOpen) {
+    return;
+  }
+
+  // Only realtime mode auto-reloads according to the sample step of 10s/30s/60s
+  if (!realtimeMode) {
+    return;
+  }
+
+  const safeTimeRange = Number(timeRange) || DEFAULT_SAMPLE_TIME;
+  const reloadMs = safeTimeRange * 1000;
+
+  const timer = window.setInterval(async () => {
+    if (chartRequestRunningRef.current) {
       return;
     }
 
-    // Chỉ realtime mới tự reload theo sample step 10s/30s/60s
-    if (!realtimeMode) {
-      return;
+    chartRequestRunningRef.current = true;
+
+    try {
+      await loadChartData(safeTimeRange, false, null, null);
+    } finally {
+      chartRequestRunningRef.current = false;
     }
+  }, reloadMs);
 
-    const safeTimeRange = Number(timeRange) || DEFAULT_SAMPLE_TIME;
-    const reloadMs = safeTimeRange * 1000;
-
-    const timer = window.setInterval(() => {
-      loadChartData(safeTimeRange, false, null, null);
-    }, reloadMs);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [
-    open,
-    chartInitialized,
-    settingOpen,
-    realtimeMode,
-    timeRange,
-    loadChartData,
-  ]);
+  return () => {
+    window.clearInterval(timer);
+  };
+}, [
+  open,
+  chartInitialized,
+  settingOpen,
+  realtimeMode,
+  timeRange,
+  loadChartData,
+]);
   const disconnectedMachineIds = useMemo(() => {
     if (!lastRefreshAt) return [];
 
@@ -468,15 +631,28 @@ export default function MachineChartDialog({
   }, [history]);
 
   const shiftTimeWindow = useCallback(
-    async (direction) => {
-      if (!xAxisDomain || xAxisDomain.length !== 2 || loading) return;
+  async (direction) => {
+    if (
+      !xAxisDomain ||
+      xAxisDomain.length !== 2 ||
+      loading ||
+      chartRequestRunningRef.current
+    ) {
+      return;
+    }
 
+    chartRequestRunningRef.current = true;
+
+    try {
       const [currentStartMs, currentEndMs] = xAxisDomain;
       const windowMs = currentEndMs - currentStartMs;
 
       if (windowMs <= 0) return;
 
-      const moveMs = Number(timeRange || 10) * DEFAULT_VISIBLE_POINTS * 1000;
+      const moveMs =
+        selectedStartTime && selectedEndTime
+          ? windowMs
+          : Number(timeRange || 10) * DEFAULT_VISIBLE_POINTS * 1000;
 
       let nextStartMs = currentStartMs;
       let nextEndMs = currentEndMs;
@@ -492,7 +668,13 @@ export default function MachineChartDialog({
         setSelectedStartTime(nextStart);
         setSelectedEndTime(nextEnd);
 
-        await loadChartData(timeRange, true, nextStart, nextEnd, true);
+        const samplePolicy = getSampleTimePolicyByRange(nextStart, nextEnd);
+        const nextTimeRange = getSafeSampleTimeForPolicy(timeRange, samplePolicy);
+
+        setTimeOptions(samplePolicy.options);
+        setTimeRange(nextTimeRange);
+
+        await loadChartData(nextTimeRange, true, nextStart, nextEnd, false);
         return;
       }
 
@@ -502,25 +684,44 @@ export default function MachineChartDialog({
       const nowMs = Date.now();
 
       if (nextEndMs >= nowMs) {
+        const nextRealtimeTimeRange = getSafeRealtimeSampleTime(timeRange);
+
         setRealtimeMode(true);
         setSelectedStartTime(null);
         setSelectedEndTime(null);
+        setTimeOptions(DEFAULT_TIME_OPTIONS);
+        setTimeRange(nextRealtimeTimeRange);
 
-        await loadChartData(timeRange, true, null, null);
+        await loadChartData(nextRealtimeTimeRange, true, null, null);
         return;
       }
 
       const nextStart = new Date(nextStartMs);
       const nextEnd = new Date(nextEndMs);
 
+      const samplePolicy = getSampleTimePolicyByRange(nextStart, nextEnd);
+      const nextTimeRange = getSafeSampleTimeForPolicy(timeRange, samplePolicy);
+
+      setTimeOptions(samplePolicy.options);
+      setTimeRange(nextTimeRange);
       setRealtimeMode(false);
       setSelectedStartTime(nextStart);
       setSelectedEndTime(nextEnd);
 
-      await loadChartData(timeRange, true, nextStart, nextEnd, true);
-    },
-    [xAxisDomain, loading, timeRange, loadChartData]
-  );
+      await loadChartData(nextTimeRange, true, nextStart, nextEnd, false);
+    } finally {
+      chartRequestRunningRef.current = false;
+    }
+  },
+  [
+    xAxisDomain,
+    loading,
+    timeRange,
+    selectedStartTime,
+    selectedEndTime,
+    loadChartData,
+  ]
+);
   const charts = useMemo(() => {
     const allCharts = [
       {
@@ -558,7 +759,13 @@ export default function MachineChartDialog({
       : "1fr";
 
   const handleDateTimeRangeChange = useCallback(
-    async (startDateValue, startTimeValue, endDateValue, endTimeValue) => {
+    async (
+      startDateValue,
+      startTimeValue,
+      endDateValue,
+      endTimeValue,
+      options = {}
+    ) => {
       const nextStartTime = combineDateAndTimeInput(
         startDateValue,
         startTimeValue
@@ -566,20 +773,56 @@ export default function MachineChartDialog({
       const nextEndTime = combineDateAndTimeInput(endDateValue, endTimeValue);
 
       if (!nextStartTime || !nextEndTime) {
-        alert("Vui lòng chọn đủ ngày giờ bắt đầu và kết thúc");
-        return;
+        alert("Please select both the start and end date/time");
+        return false;
       }
 
       if (nextStartTime >= nextEndTime) {
-        alert("Thời gian bắt đầu phải nhỏ hơn thời gian kết thúc");
-        return;
+        alert("The start time must be earlier than the end time");
+        return false;
       }
 
-      setRealtimeMode(false);
-      setSelectedStartTime(nextStartTime);
-      setSelectedEndTime(nextEndTime);
+      const samplePolicy = getSampleTimePolicyByRange(
+        nextStartTime,
+        nextEndTime
+      );
 
-      await loadChartData(timeRange, true, nextStartTime, nextEndTime);
+      if (samplePolicy.blocked) {
+        alert(samplePolicy.message);
+        return false;
+      }
+
+      const nextTimeRange = getSafeSampleTimeForPolicy(
+        timeRange,
+        samplePolicy
+      );
+
+      if (chartRequestRunningRef.current) {
+        return false;
+      }
+
+      chartRequestRunningRef.current = true;
+
+      try {
+        await options.beforeLoad?.();
+
+        setTimeOptions(samplePolicy.options);
+        setTimeRange(nextTimeRange);
+        setRealtimeMode(false);
+        setSelectedStartTime(nextStartTime);
+        setSelectedEndTime(nextEndTime);
+
+        await loadChartData(
+          nextTimeRange,
+          true,
+          nextStartTime,
+          nextEndTime
+        );
+
+        return true;
+      } finally {
+        chartRequestRunningRef.current = false;
+      }
     },
     [loadChartData, timeRange]
   );
@@ -601,7 +844,7 @@ export default function MachineChartDialog({
         return;
       }
 
-      if (action === "apply") {
+      if (action === "timeApply") {
         return;
       }
 
@@ -618,17 +861,29 @@ export default function MachineChartDialog({
         return;
       }
 
+      const nextRealtimeTimeRange = getSafeRealtimeSampleTime(timeRange);
+
       setRealtimeMode(true);
       setSelectedStartTime(null);
       setSelectedEndTime(null);
+      setTimeOptions(DEFAULT_TIME_OPTIONS);
+      setTimeRange(nextRealtimeTimeRange);
 
-      await loadChartData(timeRange, true, null, null);
+      await loadChartData(nextRealtimeTimeRange, true, null, null);
     },
     [loadChartData, timeRange, selectedStartTime, selectedEndTime]
   );
 
-  const resetToRealtime = useCallback(
-    async (nextTimeRange = DEFAULT_SAMPLE_TIME) => {
+const resetToRealtime = useCallback(
+  async (nextTimeRange = DEFAULT_SAMPLE_TIME) => {
+    if (chartRequestRunningRef.current) {
+      return;
+    }
+
+    chartRequestRunningRef.current = true;
+
+    try {
+      setTimeOptions(DEFAULT_TIME_OPTIONS);
       setTimeRange(nextTimeRange);
       setRealtimeMode(true);
       setSelectedStartTime(null);
@@ -641,6 +896,9 @@ export default function MachineChartDialog({
           CHART_STORAGE_KEY,
           JSON.stringify({
             visibleCharts,
+            timeRange: nextTimeRange,
+            selectedStartTime: null,
+            selectedEndTime: null,
             chartAxisSettings,
           })
         );
@@ -649,10 +907,14 @@ export default function MachineChartDialog({
       }
 
       await loadChartData(nextTimeRange, true, null, null);
-    },
-    [loadChartData, visibleCharts, chartAxisSettings]
-  );
+    } finally {
+      chartRequestRunningRef.current = false;
+    }
+  },
+  [loadChartData, visibleCharts, chartAxisSettings]
+);
 const handleDialogClose = useCallback(() => {
+  setTimeOptions(DEFAULT_TIME_OPTIONS);
   setTimeRange(DEFAULT_SAMPLE_TIME);
   setRealtimeMode(true);
   setSelectedStartTime(null);
@@ -666,6 +928,9 @@ const handleDialogClose = useCallback(() => {
       CHART_STORAGE_KEY,
       JSON.stringify({
         visibleCharts,
+        timeRange: DEFAULT_SAMPLE_TIME,
+        selectedStartTime: null,
+        selectedEndTime: null,
         chartAxisSettings,
       })
     );
@@ -793,22 +1058,45 @@ const handleDialogClose = useCallback(() => {
               setTimeRange={setTimeRange}
               onResetTimeRange={() => resetToRealtime()}
               onTimeRangeChange={async (nextTimeRange) => {
-                setTimeRange(nextTimeRange);
+                if (chartRequestRunningRef.current) {
+                  return;
+                }
+
+                const safeNextTimeRange = Number(nextTimeRange) || DEFAULT_SAMPLE_TIME;
+
+                setTimeRange(safeNextTimeRange);
 
                 if (selectedStartTime && selectedEndTime) {
-                  setRealtimeMode(false);
+                  chartRequestRunningRef.current = true;
 
-                  await loadChartData(
-                    nextTimeRange,
-                    true,
-                    selectedStartTime,
-                    selectedEndTime
-                  );
+                  try {
+                    setRealtimeMode(false);
+                    const nextEndTime = new Date(selectedEndTime);
+                    const nextWindowMs =
+                      safeNextTimeRange * DEFAULT_VISIBLE_POINTS * 1000;
+
+                    const nextStartTime = new Date(
+                      nextEndTime.getTime() - nextWindowMs
+                    );
+
+                    setSelectedStartTime(nextStartTime);
+                    setSelectedEndTime(nextEndTime);
+
+                    await loadChartData(
+                      safeNextTimeRange,
+                      true,
+                      nextStartTime,
+                      nextEndTime,
+                      false
+                    );
+                  } finally {
+                    chartRequestRunningRef.current = false;
+                  }
 
                   return;
                 }
 
-                await resetToRealtime(nextTimeRange);
+                await resetToRealtime(safeNextTimeRange);
               }}
               timeOptions={timeOptions}
               loading={loading}
@@ -1151,7 +1439,29 @@ function ChartBox({
     : [];
 
   const disconnectedCount = disconnectedMachineIds?.length || 0;
+  const rowByTimeMap = useMemo(() => {
+    const map = new Map();
 
+    safeData.forEach((row) => {
+      if (row.xTs) {
+        map.set(row.xTs, row);
+      }
+
+      safeSelectedMachines.forEach((id) => {
+        const recordedAt = row[`recordedAt_${id}`];
+
+        if (!recordedAt) return;
+
+        const date = parseDbDateTime(recordedAt);
+
+        if (!date) return;
+
+        map.set(date.getTime(), row);
+      });
+    });
+
+    return map;
+  }, [safeData, safeSelectedMachines]);
   const formatDateKey = useCallback((date) => {
     if (!date || Number.isNaN(date.getTime())) return "";
 
@@ -1217,14 +1527,16 @@ function ChartBox({
       : Number(axisSetting?.max ?? 100);
 
   const yScale = Number(axisSetting?.scale ?? 10);
-
+  const hasSelectedMachines = safeSelectedMachines.length > 0;
   const option = useMemo(() => {
-    const series = safeSelectedMachines.map((id) => {
+    const valueSeries = hasSelectedMachines
+  ? safeSelectedMachines.map((id) => {
       const color = machineColors[(id - 1) % machineColors.length];
 
       return {
         name: machineNameMap?.[id] || `Machine ${id}`,
         type: "line",
+        disconnectedHelper: false,
 
         // dot
         showSymbol: false,
@@ -1260,12 +1572,35 @@ function ChartBox({
           },
         },
 
-        data: safeData.map((row) => [
-          row.xTs,
-          row[`${dataPrefix}_${id}`] ?? null,
-        ]),
+        data: safeData
+          .map((row) => {
+            const value = row[`${dataPrefix}_${id}`];
+
+            const recordedAt = row[`recordedAt_${id}`];
+            const bucketTime = row.fullTime || row.realFullTime;
+
+            const isDisconnected = Boolean(row[`isDisconnected_${id}`]);
+            const xTime =
+              value === null || value === undefined || isDisconnected
+                ? bucketTime
+                : recordedAt || bucketTime;
+
+            const date = parseDbDateTime(xTime);
+
+            if (!date) return null;
+
+            return [
+              date.getTime(),
+              value === null || value === undefined ? null : value,
+            ];
+          })
+          .filter((point) => point !== null),
       };
-    });
+        })
+  : [];
+
+
+    const series = valueSeries;
 
     return {
       animation: false,
@@ -1303,31 +1638,41 @@ function ChartBox({
           color: colors.head,
         },
         formatter: (params) => {
-          if (!Array.isArray(params) || params.length === 0) return "";
+            if (!Array.isArray(params) || params.length === 0) return "";
 
-          const timeValue = params[0]?.value?.[0];
-          const time = new Date(timeValue);
-          const pad = (n) => String(n).padStart(2, "0");
-          const timeText = Number.isNaN(time.getTime())
-            ? ""
-            : `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(
-                time.getDate()
-              )} ${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(
-                time.getSeconds()
-              )}`;
+            const timeValue = params[0]?.value?.[0];
+            const timeText = formatTooltipDateTime(timeValue);
 
-          const rows = params
-            .filter(
-              (p) =>
-                p.value?.[1] !== null &&
-                p.value?.[1] !== undefined &&
-                p.value?.[1] !== ""
-            )
-            .map((p) => `${p.marker}${p.seriesName}: <b>${p.value[1]}</b>`)
-            .join("<br/>");
+            const currentRow = rowByTimeMap.get(timeValue);
 
-          return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
-        },
+            if (!currentRow) {
+              return `Time: <b>${timeText}</b>`;
+            }
+
+            const rows = safeSelectedMachines
+              .map((id) => {
+                const machineName = machineNameMap?.[id] || `Machine ${id}`;
+                const value = currentRow[`${dataPrefix}_${id}`];
+                const isDisconnected = Boolean(currentRow[`isDisconnected_${id}`]);
+                const color = machineColors[(id - 1) % machineColors.length];
+
+                const marker = `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
+
+                if (isDisconnected) {
+                  return `${marker}${machineName}: <b>Disconnected</b>`;
+                }
+
+                if (value === null || value === undefined || value === "") {
+                  return null;
+                }
+
+                return `${marker}${machineName}: <b>${value}</b>`;
+              })
+              .filter(Boolean)
+              .join("<br/>");
+
+            return `Time: <b>${timeText}</b>${rows ? `<br/>${rows}` : ""}`;
+          },
       },
       graphic:
         xAxisDomain && xAxisDomain.length === 2
@@ -1400,7 +1745,7 @@ function ChartBox({
       },
       series,
     };
-  }, [
+    }, [
     safeData,
     safeSelectedMachines,
     machineColors,
@@ -1413,6 +1758,8 @@ function ChartBox({
     yMax,
     yScale,
     formatChartTime,
+    rowByTimeMap,
+    hasSelectedMachines,
   ]);
 
   return (
@@ -1599,6 +1946,7 @@ function EChartsCanvas({ option, style }) {
       }
 
       if (chartRef.current) {
+        chartRef.current.clear();
         chartRef.current.dispose();
         chartRef.current = null;
       }
