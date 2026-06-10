@@ -205,6 +205,76 @@ def calculate_status_for_reading(setting_conn, machine_id, mold_temp, env_temp, 
     return calc_status(mold_temp, env_temp, humidity, threshold)
 
 
+CHART_SAMPLE_TIME_POLICIES = [
+    {
+        "max_days": 5,
+        "allowed_intervals": [10, 30, 60],
+        "default_interval": 10,
+        "label": "10s/30s/60s",
+    },
+    {
+        "max_days": 10,
+        "allowed_intervals": [60],
+        "default_interval": 60,
+        "label": "1p",
+    },
+    {
+        "max_days": 30,
+        "allowed_intervals": [300],
+        "default_interval": 300,
+        "label": "5p",
+    },
+    {
+        "max_days": 90,
+        "allowed_intervals": [600],
+        "default_interval": 600,
+        "label": "10p",
+    },
+    {
+        "max_days": 365,
+        "allowed_intervals": [3600],
+        "default_interval": 3600,
+        "label": "60p",
+    },
+]
+
+
+def get_chart_sample_time_policy(start_time, end_time, is_custom_range):
+    if not is_custom_range:
+        return {
+            "blocked": False,
+            "allowed_intervals": [10, 30, 60],
+            "default_interval": 10,
+            "label": "10s/30s/60s",
+            "range_days": None,
+        }
+
+    range_days = (end_time - start_time).total_seconds() / 86400
+
+    if range_days > 365:
+        return {
+            "blocked": True,
+            "message": "Khoảng thời gian lớn hơn 1 năm, không cho chọn để tránh tải dữ liệu quá nặng",
+            "range_days": range_days,
+        }
+
+    for policy in CHART_SAMPLE_TIME_POLICIES:
+        if range_days <= policy["max_days"]:
+            return {
+                "blocked": False,
+                "allowed_intervals": policy["allowed_intervals"],
+                "default_interval": policy["default_interval"],
+                "label": policy["label"],
+                "range_days": range_days,
+            }
+
+    return {
+        "blocked": True,
+        "message": "Khoảng thời gian không hợp lệ",
+        "range_days": range_days,
+    }
+
+
 @machine_bp.route("/api/debug/db", methods=["GET"])
 def debug_db():
     machine_db_path = current_app.config["MACHINE_DB_PATH"]
@@ -369,14 +439,6 @@ def get_chart_data():
     interval = request.args.get("interval", default=10, type=int)
     points = request.args.get("points", default=100, type=int)
 
-    allowed_intervals = [10, 30, 60]
-
-    if interval not in allowed_intervals:
-        return jsonify({
-            "message": "Interval không hợp lệ",
-            "allowed": allowed_intervals,
-        }), 400
-
     if points <= 0:
         points = 100
 
@@ -415,6 +477,33 @@ def get_chart_data():
         return jsonify({
             "message": "startTime phải nhỏ hơn endTime"
         }), 400
+
+    sample_policy = get_chart_sample_time_policy(
+        start_time,
+        end_time,
+        is_custom_range,
+    )
+
+    if sample_policy.get("blocked"):
+        return jsonify({
+            "message": sample_policy.get("message"),
+            "maxRangeDays": 365,
+            "rangeDays": sample_policy.get("range_days"),
+        }), 400
+
+    allowed_intervals = sample_policy["allowed_intervals"]
+
+    if interval not in allowed_intervals:
+        # Với custom range dài hơn 5 ngày, tự ép về interval tối ưu
+        # để frontend cũ hoặc request thủ công không làm query quá nặng.
+        if is_custom_range:
+            interval = sample_policy["default_interval"]
+        else:
+            return jsonify({
+                "message": "Interval không hợp lệ",
+                "allowed": allowed_intervals,
+                "defaultInterval": sample_policy["default_interval"],
+            }), 400
 
     # Check mất kết nối theo đúng step chart.
     # Ví dụ interval = 10s:
@@ -537,6 +626,7 @@ def get_chart_data():
             item[f"temp_{machine_id}"] = None
             item[f"hum_{machine_id}"] = None
             item[f"isDisconnected_{machine_id}"] = False
+            item[f"recordedAt_{machine_id}"] = None
 
             if not latest_row:
                 continue
@@ -548,6 +638,7 @@ def get_chart_data():
                 item[f"temp_{machine_id}"] = latest_row["env_temp"]
                 item[f"hum_{machine_id}"] = latest_row["humidity"]
                 item[f"isDisconnected_{machine_id}"] = False
+                item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
             else:
                 # Máy mất kết nối thì trả None để biểu đồ đứt đoạn,
                 # không trả 0 vì sẽ làm line tụt xuống 0.
@@ -555,6 +646,7 @@ def get_chart_data():
                 item[f"temp_{machine_id}"] = None
                 item[f"hum_{machine_id}"] = None
                 item[f"isDisconnected_{machine_id}"] = True
+                item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
 
         result.append(item)
         current_time += timedelta(seconds=interval)
@@ -595,20 +687,24 @@ def create_sensor_reading():
             humidity,
         )
 
+    recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     with get_machine_db() as machine_conn:
         cursor = machine_conn.execute("""
             INSERT INTO sensor_readings (
                 machine_id,
                 mold_temp,
                 env_temp,
-                humidity
+                humidity,
+                recorded_at
             )
-            VALUES (?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?);
         """, (
             machine_id,
             mold_temp,
             env_temp,
             humidity,
+            recorded_at,
         ))
 
         sensor_id = cursor.lastrowid
@@ -622,12 +718,14 @@ def create_sensor_reading():
             env_temp=env_temp,
             humidity=humidity,
             status=status,
+            occurred_at=recorded_at,
         )
 
     return jsonify({
         "message": "Lưu dữ liệu PLC thành công",
         "id": sensor_id,
-        "status": status
+        "status": status,
+        "recordedAt": recorded_at,
     })
 
 
@@ -659,19 +757,23 @@ def create_fake_sensor_readings():
                 humidity,
             )
 
+            recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             machine_conn.execute("""
                 INSERT INTO sensor_readings (
                     machine_id,
                     mold_temp,
                     env_temp,
-                    humidity
+                    humidity,
+                    recorded_at
                 )
-                VALUES (?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?);
             """, (
                 machine_id,
                 mold_temp,
                 env_temp,
                 humidity,
+                recorded_at,
             ))
 
             if status == "warning":
@@ -854,16 +956,20 @@ def create_outdoor_weather():
     outdoor_temp = float(body["temp"])
     outdoor_humidity = float(body["hum"])
 
+    recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     with get_machine_db() as conn:
         cursor = conn.execute("""
             INSERT INTO outdoor_weather_readings (
                 outdoor_temp,
-                outdoor_humidity
+                outdoor_humidity,
+                recorded_at
             )
-            VALUES (?, ?);
+            VALUES (?, ?, ?);
         """, (
             outdoor_temp,
             outdoor_humidity,
+            recorded_at,
         ))
 
         conn.commit()
@@ -872,5 +978,6 @@ def create_outdoor_weather():
         "message": "Lưu dữ liệu ngoài trời thành công",
         "id": cursor.lastrowid,
         "temp": outdoor_temp,
-        "hum": outdoor_humidity
+        "hum": outdoor_humidity,
+        "recordedAt": recorded_at,
     })
