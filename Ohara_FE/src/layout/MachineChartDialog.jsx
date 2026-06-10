@@ -247,6 +247,42 @@ const formatTooltipDateTime = (value) => {
   )}`;
 };
 
+const getPlottedMaxTimestamp = (rows, selectedMachineIds) => {
+  let maxTs = null;
+
+  if (!Array.isArray(rows) || !Array.isArray(selectedMachineIds)) {
+    return maxTs;
+  }
+
+  rows.forEach((row) => {
+    const bucketTime = row.fullTime || row.realFullTime;
+
+    selectedMachineIds.forEach((id) => {
+      const isDisconnected = Boolean(row[`isDisconnected_${id}`]);
+
+      const hasAnyValue = ["moldTemp", "temp", "hum"].some((prefix) => {
+        const value = row[`${prefix}_${id}`];
+
+        return value !== null && value !== undefined && value !== "";
+      });
+
+      const xTime =
+        hasAnyValue && !isDisconnected
+          ? row[`recordedAt_${id}`] || bucketTime
+          : bucketTime;
+
+      const date = parseDbDateTime(xTime);
+
+      if (!date) return;
+
+      const ts = date.getTime();
+      maxTs = maxTs === null ? ts : Math.max(maxTs, ts);
+    });
+  });
+
+  return maxTs;
+};
+
 const DISCONNECTED_TOOLTIP_VALUE = -999999;
 export default function MachineChartDialog({
   open,
@@ -263,6 +299,11 @@ export default function MachineChartDialog({
 }) {
   const savedChartState = useMemo(() => loadSavedChartState(), []);
   const chartRequestRunningRef = useRef(false);
+  const chartWindowModeRef = useRef("realtime"); // realtime | history | custom
+  const chartWindowRangeRef = useRef({
+    startTime: null,
+    endTime: null,
+  });
 
   const [visibleCharts, setVisibleCharts] = useState(
     Array.isArray(savedChartState.visibleCharts)
@@ -351,7 +392,7 @@ export default function MachineChartDialog({
       return {};
     }
   }, []);
-  
+
   const loadChartData = useCallback(
     async (
       interval,
@@ -439,6 +480,27 @@ export default function MachineChartDialog({
           finalEndMs = nextHistory[nextHistory.length - 1].xTs;
         }
 
+        // Points are plotted by recordedAt when available. In realtime/history
+        // mode, allow the right edge to follow the latest plotted point so the
+        // line is not clipped after changing sample time. Custom From/To keeps
+        // the user's selected range exactly.
+        if (chartWindowModeRef.current !== "custom" && nextHistory.length > 0) {
+          const plottedMaxTs = getPlottedMaxTimestamp(
+            nextHistory,
+            selectedMachines
+          );
+          const maxRightPaddingMs =
+            Number(interval || DEFAULT_SAMPLE_TIME) * 1000;
+
+          if (
+            plottedMaxTs !== null &&
+            plottedMaxTs > finalEndMs &&
+            plottedMaxTs - finalEndMs <= maxRightPaddingMs
+          ) {
+            finalEndMs = plottedMaxTs;
+          }
+        }
+
         setHistory(nextHistory);
         setXAxisDomain([finalStartMs, finalEndMs]);
 
@@ -465,12 +527,17 @@ export default function MachineChartDialog({
         }
       }
     },
-    [loadLatestMachines, selectedStartTime, selectedEndTime]
+    [loadLatestMachines, selectedStartTime, selectedEndTime, selectedMachines]
   );
 
   useEffect(() => {
     if (!open) {
       chartRequestRunningRef.current = false;
+      chartWindowModeRef.current = "realtime";
+      chartWindowRangeRef.current = {
+        startTime: null,
+        endTime: null,
+      };
       setChartInitialized(false);
       setHistory([]);
       setLastRefreshAt(null);
@@ -535,12 +602,24 @@ export default function MachineChartDialog({
         setTimeRange(nextTimeRange);
 
         if (hasSavedCustomRange) {
+          chartWindowModeRef.current = "custom";
+          chartWindowRangeRef.current = {
+            startTime: savedStartTime,
+            endTime: savedEndTime,
+          };
+
           setSelectedStartTime(savedStartTime);
           setSelectedEndTime(savedEndTime);
           setRealtimeMode(false);
 
           await loadChartData(nextTimeRange, true, savedStartTime, savedEndTime);
         } else {
+          chartWindowModeRef.current = "realtime";
+          chartWindowRangeRef.current = {
+            startTime: null,
+            endTime: null,
+          };
+
           setSelectedStartTime(null);
           setSelectedEndTime(null);
           setRealtimeMode(true);
@@ -663,6 +742,14 @@ export default function MachineChartDialog({
 
         const nextStart = new Date(nextStartMs);
         const nextEnd = new Date(nextEndMs);
+        const nextWindowMode =
+          chartWindowModeRef.current === "custom" ? "custom" : "history";
+
+        chartWindowModeRef.current = nextWindowMode;
+        chartWindowRangeRef.current = {
+          startTime: nextStart,
+          endTime: nextEnd,
+        };
 
         setRealtimeMode(false);
         setSelectedStartTime(nextStart);
@@ -686,6 +773,12 @@ export default function MachineChartDialog({
       if (nextEndMs >= nowMs) {
         const nextRealtimeTimeRange = getSafeRealtimeSampleTime(timeRange);
 
+        chartWindowModeRef.current = "realtime";
+        chartWindowRangeRef.current = {
+          startTime: null,
+          endTime: null,
+        };
+
         setRealtimeMode(true);
         setSelectedStartTime(null);
         setSelectedEndTime(null);
@@ -701,6 +794,14 @@ export default function MachineChartDialog({
 
       const samplePolicy = getSampleTimePolicyByRange(nextStart, nextEnd);
       const nextTimeRange = getSafeSampleTimeForPolicy(timeRange, samplePolicy);
+      const nextWindowMode =
+        chartWindowModeRef.current === "custom" ? "custom" : "history";
+
+      chartWindowModeRef.current = nextWindowMode;
+      chartWindowRangeRef.current = {
+        startTime: nextStart,
+        endTime: nextEnd,
+      };
 
       setTimeOptions(samplePolicy.options);
       setTimeRange(nextTimeRange);
@@ -806,6 +907,12 @@ export default function MachineChartDialog({
       try {
         await options.beforeLoad?.();
 
+        chartWindowModeRef.current = "custom";
+        chartWindowRangeRef.current = {
+          startTime: nextStartTime,
+          endTime: nextEndTime,
+        };
+
         setTimeOptions(samplePolicy.options);
         setTimeRange(nextTimeRange);
         setRealtimeMode(false);
@@ -883,6 +990,12 @@ const resetToRealtime = useCallback(
     chartRequestRunningRef.current = true;
 
     try {
+      chartWindowModeRef.current = "realtime";
+      chartWindowRangeRef.current = {
+        startTime: null,
+        endTime: null,
+      };
+
       setTimeOptions(DEFAULT_TIME_OPTIONS);
       setTimeRange(nextTimeRange);
       setRealtimeMode(true);
@@ -914,6 +1027,12 @@ const resetToRealtime = useCallback(
   [loadChartData, visibleCharts, chartAxisSettings]
 );
 const handleDialogClose = useCallback(() => {
+  chartWindowModeRef.current = "realtime";
+  chartWindowRangeRef.current = {
+    startTime: null,
+    endTime: null,
+  };
+
   setTimeOptions(DEFAULT_TIME_OPTIONS);
   setTimeRange(DEFAULT_SAMPLE_TIME);
   setRealtimeMode(true);
@@ -1062,22 +1181,64 @@ const handleDialogClose = useCallback(() => {
                   return;
                 }
 
-                const safeNextTimeRange = Number(nextTimeRange) || DEFAULT_SAMPLE_TIME;
+                const safeNextTimeRange =
+                  Number(nextTimeRange) || DEFAULT_SAMPLE_TIME;
 
                 setTimeRange(safeNextTimeRange);
 
-                if (selectedStartTime && selectedEndTime) {
+                const hasXAxisWindow =
+                  Array.isArray(xAxisDomain) &&
+                  xAxisDomain.length === 2 &&
+                  Number.isFinite(Number(xAxisDomain[0])) &&
+                  Number.isFinite(Number(xAxisDomain[1]));
+
+                const refStartTime = chartWindowRangeRef.current.startTime;
+                const refEndTime = chartWindowRangeRef.current.endTime;
+                const currentStartTime = selectedStartTime || refStartTime;
+                const currentEndTime = selectedEndTime || refEndTime;
+
+                if (
+                  chartWindowModeRef.current === "custom" &&
+                  currentStartTime &&
+                  currentEndTime
+                ) {
                   chartRequestRunningRef.current = true;
 
                   try {
                     setRealtimeMode(false);
-                    const nextEndTime = new Date(selectedEndTime);
+
+                    await loadChartData(
+                      safeNextTimeRange,
+                      true,
+                      currentStartTime,
+                      currentEndTime,
+                      false
+                    );
+                  } finally {
+                    chartRequestRunningRef.current = false;
+                  }
+
+                  return;
+                }
+
+                if (chartWindowModeRef.current === "history" && hasXAxisWindow) {
+                  chartRequestRunningRef.current = true;
+
+                  try {
+                    setRealtimeMode(false);
+
+                    const currentEndMs = Number(xAxisDomain[1]);
                     const nextWindowMs =
                       safeNextTimeRange * DEFAULT_VISIBLE_POINTS * 1000;
-
+                    const nextEndTime = new Date(currentEndMs);
                     const nextStartTime = new Date(
-                      nextEndTime.getTime() - nextWindowMs
+                      currentEndMs - nextWindowMs
                     );
+
+                    chartWindowRangeRef.current = {
+                      startTime: nextStartTime,
+                      endTime: nextEndTime,
+                    };
 
                     setSelectedStartTime(nextStartTime);
                     setSelectedEndTime(nextEndTime);
@@ -1095,6 +1256,12 @@ const handleDialogClose = useCallback(() => {
 
                   return;
                 }
+
+                chartWindowModeRef.current = "realtime";
+                chartWindowRangeRef.current = {
+                  startTime: null,
+                  endTime: null,
+                };
 
                 await resetToRealtime(safeNextTimeRange);
               }}
