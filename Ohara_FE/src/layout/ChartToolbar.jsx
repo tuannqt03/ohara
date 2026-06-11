@@ -269,7 +269,7 @@ export default function ChartToolbar({
           sx={{
             fontFamily,
             fontSize: 13,
-            fontWeight: 900,
+            fontWeight: 800,
             color: colors.head,
             whiteSpace: "nowrap",
           }}
@@ -296,7 +296,7 @@ export default function ChartToolbar({
           <MenuItem
             value="all"
             onClick={handleToggleAll}
-            sx={{ fontFamily, fontSize: 13, fontWeight: 800, gap: 1 }}
+            sx={{ fontFamily, fontSize: 13, fontWeight: 700, gap: 1 }}
           >
             <Checkbox
               checked={isAllChecked}
@@ -314,7 +314,7 @@ export default function ChartToolbar({
               key={item.value}
               value={item.value}
               onClick={() => handleToggleChart(item.value)}
-              sx={{ fontFamily, fontSize: 13, fontWeight: 800, gap: 1 }}
+              sx={{ fontFamily, fontSize: 13, fontWeight: 700, gap: 1 }}
             >
               <Checkbox
                 checked={safeVisibleCharts.includes(item.value)}
@@ -346,7 +346,7 @@ export default function ChartToolbar({
           sx={{
             fontFamily,
             fontSize: 13,
-            fontWeight: 900,
+            fontWeight: 800,
             color: colors.head,
             whiteSpace: "nowrap",
           }}

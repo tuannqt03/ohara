@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Box,
@@ -57,41 +57,41 @@ const MACHINE_COLORS = [
   "#a855f7",
   "#ef4444",
 ];
+
 const DASHBOARD_REFRESH_MS = 10 * 1000;
-
 const DASHBOARD_AUTO_RELOAD_MS = 10 * 60 * 1000;
-
 const DASHBOARD_RESTORE_KEY = "temperatureHumidityDashboardRestoreV1";
+
 const statusStyle = {
   normal: {
     label: "Normal",
     color: "#16a34a",
     bg: "linear-gradient(90deg,#16a34a,#22c55e)",
-    icon: "✅",
+    icon: "\u2705",
   },
   warning: {
     label: "Warning",
     color: "#d97706",
     bg: "linear-gradient(90deg,#d97706,#facc15)",
-    icon: "⚠️",
+    icon: "\u26a0\ufe0f",
   },
   alarm: {
     label: "Alarm",
     color: "#dc2626",
     bg: "linear-gradient(90deg,#b91c1c,#ef4444)",
-    icon: "🔴",
+    icon: "\ud83d\udd34",
   },
   disconnected: {
     label: "No Data",
     color: "#6b7280",
     bg: "linear-gradient(90deg,#6b7280,#9ca3af)",
-    icon: "⚫",
+    icon: "\u26ab",
   },
   nodata: {
     label: "No Data",
     color: "#6b7280",
     bg: "linear-gradient(90deg,#6b7280,#9ca3af)",
-    icon: "⚫",
+    icon: "\u26ab",
   },
 };
 
@@ -140,6 +140,7 @@ const formatMetric = (value, unit) => {
 
   return `${value}${unit}`;
 };
+
 const loadSavedDashboardState = () => {
   try {
     const raw = window.sessionStorage.getItem(DASHBOARD_RESTORE_KEY);
@@ -155,6 +156,7 @@ const loadSavedDashboardState = () => {
     return null;
   }
 };
+
 export default function TemperatureHumidityDashboard({ defaultOpenChart = false }) {
   const savedDashboardState = useMemo(() => loadSavedDashboardState(), []);
   const [machines, setMachines] = useState([]);
@@ -166,7 +168,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
   });
 
   const [settingOpen, setSettingOpen] = useState(
-  Boolean(savedDashboardState?.settingOpen)
+    Boolean(savedDashboardState?.settingOpen)
   );
 
   const [selectedSettingMachine, setSelectedSettingMachine] = useState(
@@ -174,6 +176,9 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
   );
 
   const [machineSetting, setMachineSetting] = useState(null);
+  const [chartThresholdSettingsByMachineId, setChartThresholdSettingsByMachineId] =
+    useState({});
+
   const navigate = useNavigate();
   const hasOpenedChartFromRoute = useRef(false);
   const autoReloadTimerRef = useRef(null);
@@ -202,8 +207,10 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
   const [warningLogOpen, setWarningLogOpen] = useState(
     Boolean(savedDashboardState?.warningLogOpen)
   );
+
   const [loading, setLoading] = useState(false);
   const machineIds = useMemo(() => machines.map((m) => m.id), [machines]);
+
   const dashboardStateRef = useRef({
     chartOpen: false,
     chartMode: "all",
@@ -214,6 +221,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
     selectedSettingMachine: null,
     selectedLogMachine: null,
   });
+
   useEffect(() => {
     dashboardStateRef.current = {
       chartOpen,
@@ -235,6 +243,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
     selectedSettingMachine,
     selectedLogMachine,
   ]);
+
   useEffect(() => {
     if (!defaultOpenChart) return;
     if (machineIds.length === 0) return;
@@ -297,93 +306,128 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
     }
   };
 
+  const loadChartThresholdSettings = useCallback(async (machineIdList = []) => {
+    const ids = Array.from(
+      new Set(
+        machineIdList
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id))
+      )
+    );
+
+    if (ids.length === 0) {
+      setChartThresholdSettingsByMachineId({});
+      return;
+    }
+
+    const results = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const res = await temperatureHumidityApi.getThresholdSetting(id);
+          return [id, res.data || null];
+        } catch (error) {
+          console.error(`Failed to load threshold setting for machine ${id}:`, error);
+          return [id, null];
+        }
+      })
+    );
+
+    const nextMap = results.reduce((acc, [id, setting]) => {
+      if (setting) {
+        acc[id] = setting;
+      }
+
+      return acc;
+    }, {});
+
+    setChartThresholdSettingsByMachineId(nextMap);
+  }, []);
+
   useEffect(() => {
-  let alive = true;
-  let running = false;
+    let alive = true;
+    let running = false;
 
-  const saveDashboardStateAndReload = () => {
-    if (!alive) return;
+    const saveDashboardStateAndReload = () => {
+      if (!alive) return;
 
-    const currentState = dashboardStateRef.current;
-    const chartStorageKey = "temperatureHumidityChartStateV1";
+      const currentState = dashboardStateRef.current;
+      const chartStorageKey = "temperatureHumidityChartStateV1";
 
-    try {
-      const rawChartState = window.localStorage.getItem(chartStorageKey);
-      const savedChartState = rawChartState ? JSON.parse(rawChartState) : {};
+      try {
+        const rawChartState = window.localStorage.getItem(chartStorageKey);
+        const savedChartState = rawChartState ? JSON.parse(rawChartState) : {};
 
-      const savedVisibleCharts =
-        Array.isArray(savedChartState.visibleCharts) &&
-        savedChartState.visibleCharts.length > 0
-          ? savedChartState.visibleCharts
-          : ["moldTemp", "envTemp", "hum"];
+        const savedVisibleCharts =
+          Array.isArray(savedChartState.visibleCharts) &&
+          savedChartState.visibleCharts.length > 0
+            ? savedChartState.visibleCharts
+            : ["moldTemp", "envTemp", "hum"];
 
-      const savedChartAxisSettings =
-        savedChartState.chartAxisSettings &&
-        typeof savedChartState.chartAxisSettings === "object"
-          ? savedChartState.chartAxisSettings
-          : {
-              moldTemp: {
-                min: 0,
-                max: 120,
-                scale: 20,
-              },
-              envTemp: {
-                min: 0,
-                max: 60,
-                scale: 10,
-              },
-              hum: {
-                min: 0,
-                max: 100,
-                scale: 20,
-              },
-            };
+        const savedChartAxisSettings =
+          savedChartState.chartAxisSettings &&
+          typeof savedChartState.chartAxisSettings === "object"
+            ? savedChartState.chartAxisSettings
+            : {
+                moldTemp: {
+                  min: 0,
+                  max: 120,
+                  scale: 20,
+                },
+                envTemp: {
+                  min: 0,
+                  max: 60,
+                  scale: 10,
+                },
+                hum: {
+                  min: 0,
+                  max: 100,
+                  scale: 20,
+                },
+              };
 
-      // Auto reload chỉ reset thời gian về realtime.
-      // Vẫn giữ loại biểu đồ đang chọn và setting trục Y.
-      window.localStorage.setItem(
-        chartStorageKey,
-        JSON.stringify({
-          visibleCharts: savedVisibleCharts,
-          timeRange: 10,
-          selectedStartTime: null,
-          selectedEndTime: null,
-          chartAxisSettings: savedChartAxisSettings,
-        })
-      );
+        window.localStorage.setItem(
+          chartStorageKey,
+          JSON.stringify({
+            visibleCharts: savedVisibleCharts,
+            timeRange: 10,
+            selectedStartTime: null,
+            selectedEndTime: null,
+            chartAxisSettings: savedChartAxisSettings,
+          })
+        );
 
-      window.sessionStorage.setItem(
-        DASHBOARD_RESTORE_KEY,
-        JSON.stringify({
-          chartOpen: currentState.chartOpen,
-          chartMode: currentState.chartMode,
-          selectedMachines: currentState.selectedMachines,
+        window.sessionStorage.setItem(
+          DASHBOARD_RESTORE_KEY,
+          JSON.stringify({
+            chartOpen: currentState.chartOpen,
+            chartMode: currentState.chartMode,
+            selectedMachines: currentState.selectedMachines,
 
-          actionMenuOpen: false,
-          warningLogOpen: false,
-          settingOpen: false,
-          selectedSettingMachine: null,
-          selectedLogMachine: null,
-        })
-      );
-    } catch (error) {
-      console.warn("Failed to save dashboard restore state:", error);
-    }
+            actionMenuOpen: false,
+            warningLogOpen: false,
+            settingOpen: false,
+            selectedSettingMachine: null,
+            selectedLogMachine: null,
+          })
+        );
+      } catch (error) {
+        console.warn("Failed to save dashboard restore state:", error);
+      }
 
-    window.location.reload();
-  };
+      window.location.reload();
+    };
 
-  const resetAutoReloadTimer = () => {
-    if (autoReloadTimerRef.current) {
-      clearTimeout(autoReloadTimerRef.current);
-    }
+    const resetAutoReloadTimer = () => {
+      if (autoReloadTimerRef.current) {
+        clearTimeout(autoReloadTimerRef.current);
+      }
 
-    autoReloadTimerRef.current = setTimeout(() => {
-      saveDashboardStateAndReload();
-    }, DASHBOARD_AUTO_RELOAD_MS);
-  };
+      autoReloadTimerRef.current = setTimeout(() => {
+        saveDashboardStateAndReload();
+      }, DASHBOARD_AUTO_RELOAD_MS);
+    };
 
-  const loadAllDashboardData = async (showLoading = false) => {
+    const loadAllDashboardData = async (showLoading = false) => {
       if (running) return;
 
       running = true;
@@ -400,17 +444,14 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
 
     loadAllDashboardData(true);
 
-    // Refresh data dashboard mỗi 10s, không reload trang
     const dashboardTimer = setInterval(() => {
       if (!alive) return;
 
       loadAllDashboardData(false);
     }, DASHBOARD_REFRESH_MS);
 
-    // Bắt đầu đếm 10 phút không thao tác
     resetAutoReloadTimer();
 
-    // Người dùng thao tác thì reset lại bộ đếm 10 phút
     const userEvents = [
       "mousemove",
       "mousedown",
@@ -440,6 +481,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
       });
     };
   }, []);
+
   useEffect(() => {
     const restoreMachineSetting = async () => {
       if (!settingOpen || !selectedSettingMachine?.id) return;
@@ -461,6 +503,21 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
 
     restoreMachineSetting();
   }, [settingOpen, selectedSettingMachine, machineSetting]);
+
+  useEffect(() => {
+    if (!chartOpen) {
+      setChartThresholdSettingsByMachineId({});
+      return;
+    }
+
+    const ids =
+      Array.isArray(selectedMachines) && selectedMachines.length > 0
+        ? selectedMachines
+        : machineIds;
+
+    loadChartThresholdSettings(ids);
+  }, [chartOpen, selectedMachines, machineIds, loadChartThresholdSettings]);
+
   const summary = useMemo(() => {
     const result = {
       normal: 0,
@@ -485,6 +542,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
 
     navigate("/chart");
   };
+
   const closeChart = () => {
     setChartOpen(false);
 
@@ -492,6 +550,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
       navigate("/dashboard");
     }
   };
+
   const openWarningLog = () => {
     setSelectedLogMachine(null);
     setWarningLogOpen(true);
@@ -577,8 +636,8 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
         >
           <Typography
             sx={{
-              fontSize: 20,
-              fontWeight: 800,
+              fontSize: 19,
+              fontWeight: 700,
               letterSpacing: 0,
               lineHeight: 1.1,
               whiteSpace: "nowrap",
@@ -588,13 +647,13 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
           </Typography>
 
           <HeaderWeatherBox
-            icon="🌡️"
+            icon={"\ud83c\udf21\ufe0f"}
             label="Outdoor Temp"
-            value={formatMetric(outdoorWeather.temp, "°C")}
+            value={formatMetric(outdoorWeather.temp, "\u00b0C")}
           />
 
           <HeaderWeatherBox
-            icon="💧"
+            icon={"\ud83d\udca7"}
             label="Outdoor Humidity"
             value={formatMetric(outdoorWeather.hum, "%")}
           />
@@ -611,28 +670,28 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
           <SummaryChip
             label="Normal"
             value={summary.normal}
-            icon="✅"
+            icon={"\u2705"}
             color="#16a34a"
           />
 
           <SummaryChip
             label="Warning"
             value={summary.warning}
-            icon="⚠️"
+            icon={"\u26a0\ufe0f"}
             color="#d97706"
           />
 
           <SummaryChip
             label="Alarm"
             value={summary.alarm}
-            icon="🔴"
+            icon={"\ud83d\udd34"}
             color="#dc2626"
           />
 
           <SummaryChip
             label="No Data"
             value={summary.disconnected}
-            icon="⚫"
+            icon={"\u26ab"}
             color="#6b7280"
           />
 
@@ -670,7 +729,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
                     color={COLORS.head}
                   />
                   <MenuActionButton
-                    icon="⚠️"
+                    icon={"\u26a0\ufe0f"}
                     label="History"
                     onClick={openWarningLog}
                     color={COLORS.head}
@@ -738,7 +797,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
           const status = getDisplayStatus(m);
           const s = statusStyle[status] || statusStyle.normal;
           const statusColor = getCardStatusColor(status);
-          const machineDisplayName = m.code ? `${m.name}_${m.code}` : m.name;
+          const machineDisplayName = m.name || "";
           return (
             <Paper
               key={m.id}
@@ -810,7 +869,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
                     px: 0.85,
                     py: 0.35,
                     borderRadius: 99,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     color: statusColor,
                     fontSize: 12.5,
                     lineHeight: 1.1,
@@ -836,19 +895,19 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
               >
                 <MetricBox
                   label="MOLD TEMP"
-                  icon="🔥"
-                  value={formatMetric(m.moldTemp, "°C")}
+                  icon={"\ud83d\udd25"}
+                  value={formatMetric(m.moldTemp, "\u00b0C")}
                 />
 
                 <MetricBox
                   label="TEMP"
-                  icon="🌡️"
-                  value={formatMetric(m.temp, "°C")}
+                  icon={"\ud83c\udf21\ufe0f"}
+                  value={formatMetric(m.temp, "\u00b0C")}
                 />
 
                 <MetricBox
                   label="HUMIDITY"
-                  icon="💧"
+                  icon={"\ud83d\udca7"}
                   value={formatMetric(m.hum, "%")}
                 />
               </Box>
@@ -859,7 +918,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
                   borderRadius: 99,
                   color: COLORS.white,
                   fontSize: 12.5,
-                  fontWeight: 700,
+                  fontWeight: 600,
                   textAlign: "center",
                   lineHeight: "26px",
                   background: s.bg,
@@ -888,9 +947,18 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
             machineId: selectedSettingMachine.id,
           });
 
+          setChartThresholdSettingsByMachineId((prev) => ({
+            ...prev,
+            [selectedSettingMachine.id]: {
+              ...newSetting,
+              machineId: selectedSettingMachine.id,
+            },
+          }));
+
           loadDashboardData(false);
         }}
       />
+
       <MachineChartDialog
         open={chartOpen}
         onClose={closeChart}
@@ -903,6 +971,7 @@ export default function TemperatureHumidityDashboard({ defaultOpenChart = false 
         machineColors={MACHINE_COLORS}
         colors={COLORS}
         fontFamily={FONT_FAMILY}
+        thresholdSettingsByMachineId={chartThresholdSettingsByMachineId}
       />
 
       <WarningLogDialog
@@ -972,7 +1041,7 @@ function HeaderWeatherBox({ icon, label, value }) {
         <Typography
           sx={{
             fontSize: 16,
-            fontWeight: 900,
+            fontWeight: 600,
             lineHeight: 1.1,
             color: COLORS.white,
             whiteSpace: "nowrap",
@@ -1003,7 +1072,7 @@ function MetricBox({ label, icon, value }) {
         sx={{
           fontSize: 10,
           color: COLORS.subtle,
-          fontWeight: 800,
+          fontWeight: 700,
           lineHeight: 1.1,
           whiteSpace: "nowrap",
           overflow: "hidden",
@@ -1016,7 +1085,7 @@ function MetricBox({ label, icon, value }) {
       <Typography
         sx={{
           fontSize: 18,
-          fontWeight: 900,
+          fontWeight: 600,
           color: COLORS.head,
           lineHeight: 1.15,
           mt: 0.45,

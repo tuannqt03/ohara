@@ -17,6 +17,10 @@ import * as echarts from "echarts";
 
 import { temperatureHumidityApi } from "../config/api";
 import ChartToolbar, { CHART_OPTIONS } from "./ChartToolbar";
+import {
+  buildThresholdMarkLines,
+  formatThresholdTooltip,
+} from "./ChartThresholdLines";
 const DEFAULT_SAMPLE_TIME = 10;
 const DISCONNECTED_LIMIT_SECONDS = 20;
 const DEFAULT_TIME_OPTIONS = [
@@ -138,7 +142,6 @@ const DEFAULT_CHART_AXIS_SETTINGS = {
     scale: 20,
   },
 };
-
 const parseSavedDate = (value) => {
   if (value === null || value === undefined || value === "") return null;
 
@@ -184,10 +187,13 @@ const loadSavedChartState = () => {
 
     return {
       visibleCharts:
-      visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
+        visibleCharts && visibleCharts.length > 0 ? visibleCharts : null,
       timeRange: null,
       selectedStartTime: null,
       selectedEndTime: null,
+      selectedMachines: Array.isArray(parsed.selectedMachines)
+        ? parsed.selectedMachines
+        : null,
       chartAxisSettings: normalizeAxisSettings(parsed.chartAxisSettings),
     };
   } catch (error) {
@@ -230,7 +236,7 @@ const formatApiDateTime = (date) => {
 const getMachineDisplayName = (machine) => {
   if (!machine) return "";
 
-  return machine.code ? `${machine.name}_${machine.code}` : machine.name;
+  return machine.name || "";
 };
 
 const formatTooltipDateTime = (value) => {
@@ -283,6 +289,61 @@ const getPlottedMaxTimestamp = (rows, selectedMachineIds) => {
   return maxTs;
 };
 
+const OUTDOOR_CHART_ID = "outdoor";
+const OUTDOOR_CHART_NAME = "Outdoor";
+const OUTDOOR_CHART_COLOR = "#111827";
+
+const getSeriesColor = (id, machineColors) => {
+  if (id === OUTDOOR_CHART_ID) {
+    return OUTDOOR_CHART_COLOR;
+  }
+
+  const numericId = Number(id);
+
+  if (!Number.isFinite(numericId)) {
+    return "#64748b";
+  }
+
+  return machineColors[(numericId - 1) % machineColors.length];
+};
+
+const getSeriesName = (id, machineNameMap) => {
+  if (id === OUTDOOR_CHART_ID) {
+    return OUTDOOR_CHART_NAME;
+  }
+
+  return machineNameMap?.[id] || `Machine ${id}`;
+};
+
+const normalizeSavedSelectedMachines = (savedSelectedMachines, machineIds) => {
+  if (!Array.isArray(savedSelectedMachines)) return null;
+
+  const availableMachineIds = new Set(
+    Array.isArray(machineIds) ? machineIds.map((id) => Number(id)) : []
+  );
+
+  const result = [];
+
+  savedSelectedMachines.forEach((id) => {
+    if (id === OUTDOOR_CHART_ID) {
+      if (!result.includes(OUTDOOR_CHART_ID)) {
+        result.push(OUTDOOR_CHART_ID);
+      }
+      return;
+    }
+
+    const numericId = Number(id);
+
+    if (Number.isFinite(numericId) && availableMachineIds.has(numericId)) {
+      if (!result.includes(numericId)) {
+        result.push(numericId);
+      }
+    }
+  });
+
+  return result;
+};
+
 const DISCONNECTED_TOOLTIP_VALUE = -999999;
 export default function MachineChartDialog({
   open,
@@ -296,8 +357,14 @@ export default function MachineChartDialog({
   machineColors,
   colors,
   fontFamily,
+  thresholdSettingsByMachineId,
 }) {
   const savedChartState = useMemo(() => loadSavedChartState(), []);
+  const hasRestoredSelectedMachinesRef = useRef(false);
+  const skipNextChartStateSaveRef = useRef(false);
+  const selectedMachinesRef = useRef(
+    Array.isArray(selectedMachines) ? selectedMachines : []
+  );
   const chartRequestRunningRef = useRef(false);
   const chartWindowModeRef = useRef("realtime"); // realtime | history | custom
   const chartWindowRangeRef = useRef({
@@ -334,10 +401,14 @@ export default function MachineChartDialog({
   );
 
   const machineNameMap = useMemo(() => {
-    return machines.reduce((acc, machine) => {
+    const map = machines.reduce((acc, machine) => {
       acc[machine.id] = getMachineDisplayName(machine);
       return acc;
     }, {});
+
+    map[OUTDOOR_CHART_ID] = OUTDOOR_CHART_NAME;
+
+    return map;
   }, [machines]);
 
   const noDataLimitSeconds = Math.max(
@@ -346,7 +417,45 @@ export default function MachineChartDialog({
   );
 
   useEffect(() => {
+    selectedMachinesRef.current = Array.isArray(selectedMachines)
+      ? selectedMachines
+      : [];
+  }, [selectedMachines]);
+
+  useEffect(() => {
+    if (!open) {
+      hasRestoredSelectedMachinesRef.current = false;
+      skipNextChartStateSaveRef.current = false;
+      return;
+    }
+
+    if (hasRestoredSelectedMachinesRef.current) return;
+    if (!Array.isArray(machineIds) || machineIds.length === 0) return;
+
+    const latestSavedChartState = loadSavedChartState();
+
+    const savedSelectedMachines = normalizeSavedSelectedMachines(
+      latestSavedChartState.selectedMachines,
+      machineIds
+    );
+
+    hasRestoredSelectedMachinesRef.current = true;
+
+    if (savedSelectedMachines === null) return;
+
+    skipNextChartStateSaveRef.current = true;
+    selectedMachinesRef.current = savedSelectedMachines;
+    setSelectedMachines(savedSelectedMachines);
+  }, [open, machineIds, setSelectedMachines]);
+
+  useEffect(() => {
     if (!open) return;
+    if (!hasRestoredSelectedMachinesRef.current) return;
+
+    if (skipNextChartStateSaveRef.current) {
+      skipNextChartStateSaveRef.current = false;
+      return;
+    }
 
     try {
       window.localStorage.setItem(
@@ -358,6 +467,7 @@ export default function MachineChartDialog({
             ? selectedStartTime.getTime()
             : null,
           selectedEndTime: selectedEndTime ? selectedEndTime.getTime() : null,
+          selectedMachines,
           chartAxisSettings,
         })
       );
@@ -370,6 +480,7 @@ export default function MachineChartDialog({
     timeRange,
     selectedStartTime,
     selectedEndTime,
+    selectedMachines,
     chartAxisSettings,
   ]);
 
@@ -687,6 +798,10 @@ export default function MachineChartDialog({
     const nowTime = lastRefreshAt.getTime();
 
     return selectedMachines.filter((machineId) => {
+      if (machineId === OUTDOOR_CHART_ID) {
+        return false;
+      }
+
       const latest = latestMachineMap[machineId];
 
       if (!latest?.recordedAt) {
@@ -934,14 +1049,18 @@ export default function MachineChartDialog({
     [loadChartData, timeRange]
   );
 
+  const firstSelectedMachine = selectedMachines[0];
+
   const title =
-  chartMode === "single"
-    ? `CHART ${
-        getMachineDisplayName(
-          machines.find((m) => m.id === selectedMachines[0])
-        ) || ""
-      }`
-    : "CHART TEMPERATURE & HUMIDITY";
+    chartMode === "single"
+      ? `CHART ${
+          firstSelectedMachine === OUTDOOR_CHART_ID
+            ? OUTDOOR_CHART_NAME
+            : getMachineDisplayName(
+                machines.find((m) => m.id === firstSelectedMachine)
+              ) || ""
+        }`
+      : "CHART TEMPERATURE & HUMIDITY";
   const handleSettingOpenChange = useCallback(
     async (isOpen, action) => {
       setSettingOpen(isOpen);
@@ -1012,6 +1131,7 @@ const resetToRealtime = useCallback(
             timeRange: nextTimeRange,
             selectedStartTime: null,
             selectedEndTime: null,
+            selectedMachines: selectedMachinesRef.current,
             chartAxisSettings,
           })
         );
@@ -1050,6 +1170,7 @@ const handleDialogClose = useCallback(() => {
         timeRange: DEFAULT_SAMPLE_TIME,
         selectedStartTime: null,
         selectedEndTime: null,
+        selectedMachines: selectedMachinesRef.current,
         chartAxisSettings,
       })
     );
@@ -1059,6 +1180,47 @@ const handleDialogClose = useCallback(() => {
 
   onClose?.();
 }, [onClose, visibleCharts, chartAxisSettings]);
+
+  const saveSelectedMachinesToStorage = useCallback(
+    (nextSelectedMachines) => {
+      const safeNextSelectedMachines = Array.isArray(nextSelectedMachines)
+        ? nextSelectedMachines
+        : [];
+
+      selectedMachinesRef.current = safeNextSelectedMachines;
+
+      try {
+        const raw = window.localStorage.getItem(CHART_STORAGE_KEY);
+        const currentState = raw ? JSON.parse(raw) : {};
+
+        window.localStorage.setItem(
+          CHART_STORAGE_KEY,
+          JSON.stringify({
+            ...currentState,
+            visibleCharts,
+            timeRange,
+            selectedStartTime: selectedStartTime
+              ? selectedStartTime.getTime()
+              : null,
+            selectedEndTime: selectedEndTime
+              ? selectedEndTime.getTime()
+              : null,
+            selectedMachines: safeNextSelectedMachines,
+            chartAxisSettings,
+          })
+        );
+      } catch (error) {
+        console.warn("Failed to save selected machines:", error);
+      }
+    },
+    [
+      visibleCharts,
+      timeRange,
+      selectedStartTime,
+      selectedEndTime,
+      chartAxisSettings,
+    ]
+  );
 
   return (
     <Dialog
@@ -1109,7 +1271,7 @@ const handleDialogClose = useCallback(() => {
             color: colors.teal,
             fontFamily,
             fontSize: 13,
-            fontWeight: 900,
+            fontWeight: 700,
             textTransform: "none",
             boxShadow: "0 2px 8px rgba(0,0,0,0.16)",
             "& .MuiButton-startIcon": {
@@ -1297,7 +1459,7 @@ const handleDialogClose = useCallback(() => {
                     justifyContent: "center",
                     fontFamily,
                     fontSize: 13,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     color: colors.subtle,
                     overflow: "hidden",
                     boxShadow: "0 3px 10px rgba(15,23,42,0.06)",
@@ -1315,6 +1477,8 @@ const handleDialogClose = useCallback(() => {
                     key={chart.key}
                     title={chart.title}
                     data={visibleHistory}
+                    chartKey={chart.key}
+                    thresholdSettingsByMachineId={thresholdSettingsByMachineId}
                     xAxisDomain={xAxisDomain}
                     isManualTimeWindow={Boolean(selectedStartTime && selectedEndTime)}
                     selectedMachines={selectedMachines}
@@ -1351,6 +1515,7 @@ const handleDialogClose = useCallback(() => {
               machineColors={machineColors}
               colors={colors}
               fontFamily={fontFamily}
+              onSaveSelectedMachines={saveSelectedMachinesToStorage}
             />
           )}
         </Box>
@@ -1390,7 +1555,7 @@ const handleDialogClose = useCallback(() => {
                   sx={{
                     fontFamily,
                     fontSize: 14,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     color: colors.head,
                     lineHeight: 1.2,
                   }}
@@ -1427,7 +1592,46 @@ function MachineSelectPanel({
   machineColors,
   colors,
   fontFamily,
+  onSaveSelectedMachines,
 }) {
+  const safeSelectedMachines = Array.isArray(selectedMachines)
+    ? selectedMachines
+    : [];
+
+  const allSelectableIds = [OUTDOOR_CHART_ID, ...machineIds];
+
+  const normalizeSelectionOrder = (ids) => {
+    const uniqueIds = Array.from(new Set(Array.isArray(ids) ? ids : []));
+    const hasOutdoor = uniqueIds.includes(OUTDOOR_CHART_ID);
+
+    const numericIds = uniqueIds
+      .filter((id) => id !== OUTDOOR_CHART_ID)
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id))
+      .sort((a, b) => a - b);
+
+    return hasOutdoor ? [OUTDOOR_CHART_ID, ...numericIds] : numericIds;
+  };
+
+  const saveAndSetSelectedMachines = (nextSelectedMachines) => {
+    const normalizedSelectedMachines = normalizeSelectionOrder(
+      nextSelectedMachines
+    );
+
+    setSelectedMachines(normalizedSelectedMachines);
+    onSaveSelectedMachines?.(normalizedSelectedMachines);
+  };
+
+  const toggleOutdoor = () => {
+    const current = Array.isArray(selectedMachines) ? selectedMachines : [];
+
+    const nextSelectedMachines = current.includes(OUTDOOR_CHART_ID)
+      ? current.filter((id) => id !== OUTDOOR_CHART_ID)
+      : [OUTDOOR_CHART_ID, ...current];
+
+    saveAndSetSelectedMachines(nextSelectedMachines);
+  };
+
   return (
     <Paper
       elevation={0}
@@ -1467,7 +1671,7 @@ function MachineSelectPanel({
         <Button
           fullWidth
           variant="contained"
-          onClick={() => setSelectedMachines(machineIds)}
+          onClick={() => saveAndSetSelectedMachines(allSelectableIds)}
           sx={{
             height: 38,
             mb: 1,
@@ -1484,13 +1688,13 @@ function MachineSelectPanel({
             },
           }}
         >
-          Select all {machineIds.length} machines
+          Select all {allSelectableIds.length} items
         </Button>
 
         <Button
           fullWidth
           variant="outlined"
-          onClick={() => setSelectedMachines([])}
+          onClick={() => saveAndSetSelectedMachines([])}
           sx={{
             height: 38,
             color: colors.head,
@@ -1530,6 +1734,44 @@ function MachineSelectPanel({
           },
         }}
       >
+        <FormControlLabel
+          key={OUTDOOR_CHART_ID}
+          sx={{
+            width: "100%",
+            m: 0,
+            py: 0.35,
+            alignItems: "center",
+            "& .MuiFormControlLabel-label": {
+              fontSize: 14.5,
+              fontWeight: 700,
+              minWidth: 0,
+            },
+          }}
+          control={
+            <Checkbox
+              checked={safeSelectedMachines.includes(OUTDOOR_CHART_ID)}
+              onChange={toggleOutdoor}
+              sx={{
+                color: OUTDOOR_CHART_COLOR,
+                "&.Mui-checked": { color: OUTDOOR_CHART_COLOR },
+              }}
+            />
+          }
+          label={
+            <Box
+              component="span"
+              sx={{
+                color: OUTDOOR_CHART_COLOR,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+              }}
+              title={OUTDOOR_CHART_NAME}
+            >
+              {OUTDOOR_CHART_NAME}
+            </Box>
+          }
+        />
+
         {machines.map((m) => {
           const machineDisplayName = getMachineDisplayName(m);
 
@@ -1549,8 +1791,18 @@ function MachineSelectPanel({
               }}
               control={
                 <Checkbox
-                  checked={selectedMachines.includes(m.id)}
-                  onChange={() => toggleMachine(m.id)}
+                  checked={safeSelectedMachines.includes(m.id)}
+                  onChange={() => {
+                    const current = Array.isArray(selectedMachines)
+                      ? selectedMachines
+                      : [];
+
+                    const nextSelectedMachines = current.includes(m.id)
+                      ? current.filter((id) => id !== m.id)
+                      : [...current, m.id];
+
+                    saveAndSetSelectedMachines(nextSelectedMachines);
+                  }}
                   sx={{
                     color: colors.head,
                     "&.Mui-checked": { color: colors.head },
@@ -1579,6 +1831,7 @@ function MachineSelectPanel({
 }
 
 function ChartBox({
+  chartKey,
   title,
   data,
   xAxisDomain,
@@ -1594,6 +1847,7 @@ function ChartBox({
   loading,
   machineNameMap,
   yZoomRange,
+  thresholdSettingsByMachineId,
   onBack,
   onNext,
   onReset,
@@ -1605,6 +1859,14 @@ function ChartBox({
     ? selectedMachines
     : [];
 
+  const plottableSelectedMachines = useMemo(() => {
+    if (dataPrefix === "moldTemp") {
+      return safeSelectedMachines.filter((id) => id !== OUTDOOR_CHART_ID);
+    }
+
+    return safeSelectedMachines;
+  }, [dataPrefix, safeSelectedMachines]);
+
   const disconnectedCount = disconnectedMachineIds?.length || 0;
   const rowByTimeMap = useMemo(() => {
     const map = new Map();
@@ -1614,7 +1876,7 @@ function ChartBox({
         map.set(row.xTs, row);
       }
 
-      safeSelectedMachines.forEach((id) => {
+      plottableSelectedMachines.forEach((id) => {
         const recordedAt = row[`recordedAt_${id}`];
 
         if (!recordedAt) return;
@@ -1628,7 +1890,7 @@ function ChartBox({
     });
 
     return map;
-  }, [safeData, safeSelectedMachines]);
+  }, [safeData, plottableSelectedMachines]);
   const formatDateKey = useCallback((date) => {
     if (!date || Number.isNaN(date.getTime())) return "";
 
@@ -1694,14 +1956,52 @@ function ChartBox({
       : Number(axisSetting?.max ?? 100);
 
   const yScale = Number(axisSetting?.scale ?? 10);
-  const hasSelectedMachines = safeSelectedMachines.length > 0;
+  const hasSelectedMachines = plottableSelectedMachines.length > 0;
+  const machineColorMap = useMemo(() => {
+    return plottableSelectedMachines.reduce((acc, id) => {
+      acc[id] = getSeriesColor(id, machineColors);
+      return acc;
+    }, {});
+  }, [plottableSelectedMachines, machineColors]);
+
+  const thresholdMarkLines = useMemo(
+    () =>
+      buildThresholdMarkLines({
+        chartKey,
+        thresholdSettingsByMachineId,
+        selectedMachineIds: plottableSelectedMachines,
+        machineNameMap,
+        machineColorMap,
+      }),
+    [
+      chartKey,
+      thresholdSettingsByMachineId,
+      plottableSelectedMachines,
+      machineNameMap,
+      machineColorMap,
+    ]
+  );
+
+  const thresholdValues = thresholdMarkLines
+    .map((item) => Number(item.yAxis))
+    .filter((value) => Number.isFinite(value));
+
+  const finalYMin =
+    thresholdValues.length > 0
+      ? Math.min(yMin, ...thresholdValues)
+      : yMin;
+
+  const finalYMax =
+    thresholdValues.length > 0
+      ? Math.max(yMax, ...thresholdValues)
+      : yMax;
   const option = useMemo(() => {
     const valueSeries = hasSelectedMachines
-  ? safeSelectedMachines.map((id) => {
-      const color = machineColors[(id - 1) % machineColors.length];
+  ? plottableSelectedMachines.map((id) => {
+      const color = getSeriesColor(id, machineColors);
 
       return {
-        name: machineNameMap?.[id] || `Machine ${id}`,
+        name: getSeriesName(id, machineNameMap),
         type: "line",
         disconnectedHelper: false,
 
@@ -1767,7 +2067,59 @@ function ChartBox({
   : [];
 
 
-    const series = valueSeries;
+    const thresholdSeries =
+      thresholdMarkLines.length > 0
+        ? [
+            {
+              name: "Threshold",
+              type: "line",
+              data: [],
+              silent: false,
+              symbol: "none",
+              lineStyle: {
+                opacity: 0,
+              },
+              tooltip: {
+                show: false,
+              },
+              markLine: {
+                silent: false,
+                triggerLineEvent: true,
+                symbol: ["none", "none"],
+                precision: 1,
+                animation: false,
+                label: {
+                  show: true,
+                  position: "start",
+                  distance: 8,
+                  fontSize: 10,
+                  fontFamily,
+                  fontWeight: 700,
+                  align: "right",
+                  verticalAlign: "middle",
+                  backgroundColor: "transparent",
+                  padding: 0,
+                  borderRadius: 0,
+                },
+                emphasis: {
+                  label: {
+                    show: true,
+                  },
+                  lineStyle: {
+                    width: 2,
+                    opacity: 0.95,
+                  },
+                },
+                tooltip: {
+                  show: false,
+                },
+                data: thresholdMarkLines,
+              },
+            },
+          ]
+        : [];
+
+  const series = [...valueSeries, ...thresholdSeries];
 
     return {
       animation: false,
@@ -1777,7 +2129,7 @@ function ChartBox({
         top: 10,
         right: 18,
         bottom: shouldShowDateOnXAxis ? 44 : 36,
-        left: 18,
+        left: 35,
         containLabel: false,
       },
       tooltip: {
@@ -1790,13 +2142,7 @@ function ChartBox({
         extraCssText:
           "border-radius:10px;box-shadow:0 8px 20px rgba(15,23,42,0.16);",
         axisPointer: {
-          type: "line",
-          snap: true,
-          lineStyle: {
-            type: "dashed",
-            width: 1,
-            color: "#64748b",
-          },
+          type: "none",
         },
         textStyle: {
           fontFamily,
@@ -1816,12 +2162,12 @@ function ChartBox({
               return `Time: <b>${timeText}</b>`;
             }
 
-            const rows = safeSelectedMachines
+            const rows = plottableSelectedMachines
               .map((id) => {
-                const machineName = machineNameMap?.[id] || `Machine ${id}`;
+                const machineName = getSeriesName(id, machineNameMap);
                 const value = currentRow[`${dataPrefix}_${id}`];
                 const isDisconnected = Boolean(currentRow[`isDisconnected_${id}`]);
-                const color = machineColors[(id - 1) % machineColors.length];
+                const color = getSeriesColor(id, machineColors);
 
                 const marker = `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>`;
 
@@ -1878,7 +2224,7 @@ function ChartBox({
         axisLine: {
           show: true,
           lineStyle: {
-            color: "#111827",
+            color: "#c4c4c4",
             width: 1,
           },
         },
@@ -1890,8 +2236,8 @@ function ChartBox({
       },
       yAxis: {
         type: "value",
-        min: yMin,
-        max: yMax,
+        min: finalYMin,
+        max: finalYMax,
         interval:
           Number.isFinite(yScale) && yScale > 0 ? yScale : undefined,
         axisLine: { show: false },
@@ -1900,21 +2246,24 @@ function ChartBox({
           show: true,
           lineStyle: {
             type: "dashed",
-            color: "#cbd5e1",
+            color: "#e2e8f0",
+            width: 1,
+            opacity: 0.75,
           },
         },
         axisLabel: {
           color: colors.head,
           fontFamily,
           fontSize: 10,
-          fontWeight: 800,
+          fontWeight: 700,
+          margin: 8,
         },
       },
       series,
     };
     }, [
     safeData,
-    safeSelectedMachines,
+    plottableSelectedMachines,
     machineColors,
     machineNameMap,
     dataPrefix,
@@ -1923,10 +2272,13 @@ function ChartBox({
     xAxisDomain,
     yMin,
     yMax,
+    finalYMin,
+    finalYMax,
     yScale,
     formatChartTime,
     rowByTimeMap,
     hasSelectedMachines,
+    thresholdMarkLines,
   ]);
 
   return (
@@ -2073,9 +2425,36 @@ function ChartBox({
 }
 
 function EChartsCanvas({ option, style }) {
+  const wrapperRef = useRef(null);
   const domRef = useRef(null);
   const chartRef = useRef(null);
   const resizeObserverRef = useRef(null);
+  const [thresholdTooltip, setThresholdTooltip] = useState(null);
+
+  const thresholdLines = useMemo(() => {
+    if (!option || !Array.isArray(option.series)) return [];
+
+    const lines = [];
+
+    option.series.forEach((seriesItem, seriesIndex) => {
+      const data = seriesItem?.markLine?.data;
+      if (!Array.isArray(data)) return;
+
+      data.forEach((lineItem, dataIndex) => {
+        const yValue = Number(lineItem?.yAxis);
+        if (!Number.isFinite(yValue) || !lineItem?.thresholdMeta) return;
+
+        lines.push({
+          ...lineItem,
+          yValue,
+          seriesIndex,
+          dataIndex,
+        });
+      });
+    });
+
+    return lines;
+  }, [option]);
 
   useEffect(() => {
     if (!domRef.current) return undefined;
@@ -2130,7 +2509,129 @@ function EChartsCanvas({ option, style }) {
     });
   }, [option]);
 
-  return <div ref={domRef} style={style} />;
+  useEffect(() => {
+    const chart = chartRef.current;
+    const wrapper = wrapperRef.current;
+
+    if (!chart || !wrapper || thresholdLines.length === 0) {
+      setThresholdTooltip(null);
+      return undefined;
+    }
+
+    const hideThresholdTooltip = () => {
+      setThresholdTooltip(null);
+    };
+
+    const showThresholdTooltip = (event) => {
+      const offsetX = Number(event?.offsetX);
+      const offsetY = Number(event?.offsetY);
+
+      if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) {
+        hideThresholdTooltip();
+        return;
+      }
+
+      const point = [offsetX, offsetY];
+
+      if (!chart.containPixel({ gridIndex: 0 }, point)) {
+        hideThresholdTooltip();
+        return;
+      }
+
+      const matchedLines = thresholdLines.filter((line) => {
+        const yPixel = chart.convertToPixel({ yAxisIndex: 0 }, line.yValue);
+
+        return Number.isFinite(yPixel) && Math.abs(yPixel - offsetY) <= 6;
+      });
+
+      if (matchedLines.length === 0) {
+        hideThresholdTooltip();
+        return;
+      }
+
+      chart.dispatchAction({ type: "hideTip" });
+
+      const wrapperRect = wrapper.getBoundingClientRect();
+      const tooltipWidth = 320;
+
+      const matchedMetaCount = matchedLines.reduce((total, line) => {
+        if (Array.isArray(line.thresholdMeta)) {
+          return total + line.thresholdMeta.length;
+        }
+
+        return total + 1;
+      }, 0);
+
+      const tooltipHeight = 42 + matchedMetaCount * 24;
+
+      setThresholdTooltip({
+        left: Math.min(offsetX + 12, Math.max(8, wrapperRect.width - tooltipWidth - 8)),
+        top: Math.min(offsetY + 12, Math.max(8, wrapperRect.height - tooltipHeight - 8)),
+        html: formatThresholdTooltip(
+          matchedLines.flatMap((line) =>
+            Array.isArray(line.thresholdMeta)
+              ? line.thresholdMeta
+              : [line.thresholdMeta]
+          )
+        ),
+      });
+    };
+
+    const zr = chart.getZr();
+
+    zr.on("mousemove", showThresholdTooltip);
+    zr.on("click", showThresholdTooltip);
+    zr.on("globalout", hideThresholdTooltip);
+
+    return () => {
+      zr.off("mousemove", showThresholdTooltip);
+      zr.off("click", showThresholdTooltip);
+      zr.off("globalout", hideThresholdTooltip);
+    };
+  }, [thresholdLines]);
+
+  return (
+    <div
+      ref={wrapperRef}
+      style={{
+        ...style,
+        position: "relative",
+      }}
+    >
+      <div
+        ref={domRef}
+        style={{
+          width: "100%",
+          height: "100%",
+        }}
+      />
+
+      {thresholdTooltip && (
+        <div
+          style={{
+            position: "absolute",
+            left: thresholdTooltip.left,
+            top: thresholdTooltip.top,
+            zIndex: 30,
+            maxWidth: 320,
+            overflow: "visible",
+            padding: "8px 10px",
+            borderRadius: 10,
+            border: "1px solid #d1d5db",
+            background: "#fff",
+            boxShadow: "0 8px 20px rgba(15,23,42,0.16)",
+            color: "#111827",
+            fontFamily: "inherit",
+            fontSize: 11,
+            fontWeight: 700,
+            lineHeight: 1.45,
+            pointerEvents: "none",
+          }}
+          dangerouslySetInnerHTML={{ __html: thresholdTooltip.html }}
+        />
+      )}
+    </div>
+  );
 }
 
 const chartNavGroupSx = {
@@ -2156,7 +2657,7 @@ function chartNavButtonSx(colors, fontFamily) {
     borderRadius: 1.4,
     fontFamily,
     fontSize: 12,
-    fontWeight: 900,
+    fontWeight: 700,
     lineHeight: 1,
     textTransform: "none",
     color: colors.head,
