@@ -14,12 +14,13 @@ from settingmachine import (
 
 machine_bp = Blueprint("machine", __name__)
 
+OUTDOOR_CHART_ID = "outdoor"
 
 
 def get_machine_db():
     db_path = current_app.config.get(
         "MACHINE_DB_PATH",
-        Path(__file__).resolve().parent / "database" / "machine.db"
+        Path(__file__).resolve().parent / "database" / "machine.db",
     )
 
     conn = sqlite3.connect(db_path)
@@ -30,22 +31,27 @@ def get_machine_db():
 
 def get_machine_by_id(machine_id):
     with get_machine_db() as conn:
-        return conn.execute("""
+        return conn.execute(
+            """
             SELECT id, machine_code, machine_name, is_active
             FROM machines
             WHERE id = ?
               AND is_active = 1;
-        """, (machine_id,)).fetchone()
+            """,
+            (machine_id,),
+        ).fetchone()
 
 
 def get_machine_name_map():
     with get_machine_db() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT id, machine_code, machine_name
             FROM machines
             WHERE is_active = 1
             ORDER BY id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
     return {
         row["id"]: {
@@ -72,20 +78,22 @@ def generate_safe_outdoor_values():
     )
 
 
-
 def ensure_warning_alarm_logs_schema(setting_conn):
-    """Đảm bảo bảng log có cột resolved_at để biết cảnh báo đã kết thúc chưa."""
-    columns = setting_conn.execute("""
+    columns = setting_conn.execute(
+        """
         PRAGMA table_info(warning_alarm_logs);
-    """).fetchall()
+        """
+    ).fetchall()
 
     column_names = {column["name"] for column in columns}
 
     if "resolved_at" not in column_names:
-        setting_conn.execute("""
+        setting_conn.execute(
+            """
             ALTER TABLE warning_alarm_logs
             ADD COLUMN resolved_at TEXT;
-        """)
+            """
+        )
         setting_conn.commit()
 
 
@@ -100,15 +108,16 @@ def build_warning_message(mold_temp, env_temp, humidity, threshold):
     )
 
     if "Mold Temp" in sources:
-        warning_parts.append(f"Mold Temp ({mold_temp}°C)")
+        warning_parts.append(f"Mold Temp ({mold_temp}C)")
 
     if "Temp" in sources:
-        warning_parts.append(f"Temp ({env_temp}°C)")
+        warning_parts.append(f"Temp ({env_temp}C)")
 
     if "Humidity" in sources:
         warning_parts.append(f"Humidity ({humidity}%)")
 
     return ", ".join(warning_parts)
+
 
 def create_warning_log_if_needed(
     setting_conn,
@@ -119,27 +128,24 @@ def create_warning_log_if_needed(
     status,
     occurred_at=None,
 ):
-    """
-    Ghi log theo phiên cảnh báo:
-    - Một máy đang warning/alarm liên tục thì chỉ tạo 1 log active.
-    - Khi máy về normal thì đóng log active bằng resolved_at.
-    - Sau khi đã normal, nếu lại warning/alarm thì tạo log mới.
-    """
     ensure_warning_alarm_logs_schema(setting_conn)
 
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if status == "normal":
-        setting_conn.execute("""
+        setting_conn.execute(
+            """
             UPDATE warning_alarm_logs
             SET resolved_at = ?
             WHERE machine_id = ?
               AND COALESCE(is_deleted, 0) = 0
               AND resolved_at IS NULL;
-        """, (
-            occurred_at_text,
-            machine["id"],
-        ))
+            """,
+            (
+                occurred_at_text,
+                machine["id"],
+            ),
+        )
 
         setting_conn.commit()
         return None
@@ -159,7 +165,8 @@ def create_warning_log_if_needed(
         threshold,
     )
 
-    active_log = setting_conn.execute("""
+    active_log = setting_conn.execute(
+        """
         SELECT *
         FROM warning_alarm_logs
         WHERE machine_id = ?
@@ -167,12 +174,15 @@ def create_warning_log_if_needed(
           AND resolved_at IS NULL
         ORDER BY occurred_at DESC, id DESC
         LIMIT 1;
-    """, (machine["id"],)).fetchone()
+        """,
+        (machine["id"],),
+    ).fetchone()
 
     if active_log:
         return active_log["id"]
 
-    cursor = setting_conn.execute("""
+    cursor = setting_conn.execute(
+        """
         INSERT INTO warning_alarm_logs (
             machine_id,
             mold_temp,
@@ -185,18 +195,19 @@ def create_warning_log_if_needed(
             is_confirmed
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0);
-    """, (
-        machine["id"],
-        mold_temp,
-        env_temp,
-        humidity,
-        status,
-        message,
-        occurred_at_text,
-    ))
+        """,
+        (
+            machine["id"],
+            mold_temp,
+            env_temp,
+            humidity,
+            status,
+            message,
+            occurred_at_text,
+        ),
+    )
 
     setting_conn.commit()
-
     return cursor.lastrowid
 
 
@@ -254,7 +265,7 @@ def get_chart_sample_time_policy(start_time, end_time, is_custom_range):
     if range_days > 365:
         return {
             "blocked": True,
-            "message": "Khoảng thời gian lớn hơn 1 năm, không cho chọn để tránh tải dữ liệu quá nặng",
+            "message": "Time range is longer than 1 year. Please choose a range of 1 year or less.",
             "range_days": range_days,
         }
 
@@ -270,7 +281,7 @@ def get_chart_sample_time_policy(start_time, end_time, is_custom_range):
 
     return {
         "blocked": True,
-        "message": "Khoảng thời gian không hợp lệ",
+        "message": "Invalid time range",
         "range_days": range_days,
     }
 
@@ -295,22 +306,26 @@ def debug_db():
 
     if machine_db_path.exists():
         with get_machine_db() as conn:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'table'
                 ORDER BY name;
-            """).fetchall()
+                """
+            ).fetchall()
             result["machineDb"]["tables"] = [row["name"] for row in rows]
 
     if setting_machine_db_path.exists():
         with get_setting_machine_db() as conn:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'table'
                 ORDER BY name;
-            """).fetchall()
+                """
+            ).fetchall()
             result["settingMachineDb"]["tables"] = [row["name"] for row in rows]
 
     return jsonify(result)
@@ -319,7 +334,8 @@ def debug_db():
 @machine_bp.route("/api/machines/latest", methods=["GET"])
 def get_latest_machines():
     with get_machine_db() as machine_conn:
-        machines = machine_conn.execute("""
+        machines = machine_conn.execute(
+            """
             SELECT
                 id,
                 machine_code,
@@ -327,9 +343,11 @@ def get_latest_machines():
             FROM machines
             WHERE is_active = 1
             ORDER BY id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
-        latest_rows = machine_conn.execute("""
+        latest_rows = machine_conn.execute(
+            """
             SELECT
                 r.machine_id,
                 r.mold_temp,
@@ -347,12 +365,10 @@ def get_latest_machines():
                 ON latest.machine_id = r.machine_id
                AND latest.latest_key = r.recorded_at || printf('%010d', r.id)
             ORDER BY r.machine_id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
-    latest_map = {
-        row["machine_id"]: row
-        for row in latest_rows
-    }
+    latest_map = {row["machine_id"]: row for row in latest_rows}
 
     data = []
     now = datetime.now()
@@ -366,7 +382,7 @@ def get_latest_machines():
         try:
             recorded_at = datetime.strptime(
                 latest_row["recorded_at"],
-                "%Y-%m-%d %H:%M:%S"
+                "%Y-%m-%d %H:%M:%S",
             )
         except ValueError:
             return True
@@ -413,23 +429,22 @@ def get_latest_machines():
             active_log_id = None
             need_confirm = False
 
-            data.append({
-                "id": machine["id"],
-                "code": machine["machine_code"],
-                "name": machine["machine_name"],
-
-                "moldTemp": None if disconnected else latest["mold_temp"],
-                "temp": None if disconnected else latest["env_temp"],
-                "hum": None if disconnected else latest["humidity"],
-
-                "status": display_status,
-                "currentStatus": calculated_status,
-                "needConfirm": need_confirm,
-                "activeLogId": active_log_id,
-                "isDisconnected": disconnected,
-
-                "recordedAt": latest["recorded_at"] if latest else None,
-            })
+            data.append(
+                {
+                    "id": machine["id"],
+                    "code": machine["machine_code"],
+                    "name": machine["machine_name"],
+                    "moldTemp": None if disconnected else latest["mold_temp"],
+                    "temp": None if disconnected else latest["env_temp"],
+                    "hum": None if disconnected else latest["humidity"],
+                    "status": display_status,
+                    "currentStatus": calculated_status,
+                    "needConfirm": need_confirm,
+                    "activeLogId": active_log_id,
+                    "isDisconnected": disconnected,
+                    "recordedAt": latest["recorded_at"] if latest else None,
+                }
+            )
 
     return jsonify(data)
 
@@ -450,9 +465,7 @@ def get_chart_data():
 
         if is_custom_range:
             if not start_time_text or not end_time_text:
-                return jsonify({
-                    "message": "Custom range cần đủ startTime và endTime"
-                }), 400
+                return jsonify({"message": "Custom range needs both startTime and endTime"}), 400
 
             start_time = datetime.strptime(
                 start_time_text,
@@ -463,20 +476,14 @@ def get_chart_data():
                 "%Y-%m-%d %H:%M:%S",
             )
         else:
-            # Realtime: lấy mốc kết thúc theo thời gian hiện tại,
-            # không lấy theo latest_time trong DB.
             end_time = datetime.now().replace(microsecond=0)
             start_time = end_time - timedelta(seconds=interval * points)
 
     except ValueError:
-        return jsonify({
-            "message": "startTime/endTime không hợp lệ, định dạng đúng là YYYY-MM-DD HH:mm:ss"
-        }), 400
+        return jsonify({"message": "Invalid startTime/endTime format. Use YYYY-MM-DD HH:mm:ss"}), 400
 
     if start_time >= end_time:
-        return jsonify({
-            "message": "startTime phải nhỏ hơn endTime"
-        }), 400
+        return jsonify({"message": "startTime must be earlier than endTime"}), 400
 
     sample_policy = get_chart_sample_time_policy(
         start_time,
@@ -485,42 +492,42 @@ def get_chart_data():
     )
 
     if sample_policy.get("blocked"):
-        return jsonify({
-            "message": sample_policy.get("message"),
-            "maxRangeDays": 365,
-            "rangeDays": sample_policy.get("range_days"),
-        }), 400
+        return jsonify(
+            {
+                "message": sample_policy.get("message"),
+                "maxRangeDays": 365,
+                "rangeDays": sample_policy.get("range_days"),
+            }
+        ), 400
 
     allowed_intervals = sample_policy["allowed_intervals"]
 
     if interval not in allowed_intervals:
-        # Với custom range dài hơn 5 ngày, tự ép về interval tối ưu
-        # để frontend cũ hoặc request thủ công không làm query quá nặng.
         if is_custom_range:
             interval = sample_policy["default_interval"]
         else:
-            return jsonify({
-                "message": "Interval không hợp lệ",
-                "allowed": allowed_intervals,
-                "defaultInterval": sample_policy["default_interval"],
-            }), 400
+            return jsonify(
+                {
+                    "message": "Invalid interval",
+                    "allowed": allowed_intervals,
+                    "defaultInterval": sample_policy["default_interval"],
+                }
+            ), 400
 
-    # Check mất kết nối theo đúng step chart.
-    # Ví dụ interval = 10s:
-    # record cuối 08:37:20, đến 08:37:30 chưa có data mới => về 0.
     disconnect_after_seconds = interval * 2
 
     with get_machine_db() as machine_conn:
-        machines = machine_conn.execute("""
+        machines = machine_conn.execute(
+            """
             SELECT id
             FROM machines
             WHERE is_active = 1
             ORDER BY id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
-        # Lấy record cuối cùng trước start_time cho mỗi máy.
-        # Việc này giúp chart vẫn biết trạng thái nếu user mở đúng giữa đoạn mất kết nối.
-        latest_before_start_rows = machine_conn.execute("""
+        latest_before_start_rows = machine_conn.execute(
+            """
             SELECT
                 r.machine_id,
                 r.recorded_at,
@@ -539,12 +546,14 @@ def get_chart_data():
                 ON latest.machine_id = r.machine_id
                AND latest.latest_key = r.recorded_at || printf('%010d', r.id)
             ORDER BY r.machine_id ASC;
-        """, (
-            start_time.strftime("%Y-%m-%d %H:%M:%S"),
-        )).fetchall()
+            """,
+            (
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
 
-        # Lấy dữ liệu thật trong khoảng đang xem.
-        rows_in_range = machine_conn.execute("""
+        rows_in_range = machine_conn.execute(
+            """
             SELECT
                 machine_id,
                 recorded_at,
@@ -555,10 +564,45 @@ def get_chart_data():
             WHERE recorded_at >= ?
               AND recorded_at <= ?
             ORDER BY recorded_at ASC, machine_id ASC;
-        """, (
-            start_time.strftime("%Y-%m-%d %H:%M:%S"),
-            end_time.strftime("%Y-%m-%d %H:%M:%S"),
-        )).fetchall()
+            """,
+            (
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
+
+        latest_outdoor_before_start = machine_conn.execute(
+            """
+            SELECT
+                recorded_at,
+                outdoor_temp,
+                outdoor_humidity
+            FROM outdoor_weather_readings
+            WHERE recorded_at < ?
+            ORDER BY recorded_at DESC, id DESC
+            LIMIT 1;
+            """,
+            (
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchone()
+
+        outdoor_rows_in_range = machine_conn.execute(
+            """
+            SELECT
+                recorded_at,
+                outdoor_temp,
+                outdoor_humidity
+            FROM outdoor_weather_readings
+            WHERE recorded_at >= ?
+              AND recorded_at <= ?
+            ORDER BY recorded_at ASC, id ASC;
+            """,
+            (
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
 
     machine_ids = [row["id"] for row in machines]
     all_rows = list(latest_before_start_rows) + list(rows_in_range)
@@ -578,21 +622,53 @@ def get_chart_data():
 
         machine_id = row["machine_id"]
 
-        rows_by_machine.setdefault(machine_id, []).append({
-            "dt": recorded_dt,
-            "recorded_at": recorded_at,
-            "mold_temp": row["mold_temp"],
-            "env_temp": row["env_temp"],
-            "humidity": row["humidity"],
-        })
+        rows_by_machine.setdefault(machine_id, []).append(
+            {
+                "dt": recorded_dt,
+                "recorded_at": recorded_at,
+                "mold_temp": row["mold_temp"],
+                "env_temp": row["env_temp"],
+                "humidity": row["humidity"],
+            }
+        )
 
     for machine_id in rows_by_machine:
         rows_by_machine[machine_id].sort(
             key=lambda item: (item["dt"], item["recorded_at"])
         )
 
+    outdoor_source_rows = (
+        ([latest_outdoor_before_start] if latest_outdoor_before_start else [])
+        + list(outdoor_rows_in_range)
+    )
+
+    outdoor_rows = []
+
+    for row in outdoor_source_rows:
+        recorded_at = row["recorded_at"]
+
+        if not recorded_at:
+            continue
+
+        try:
+            recorded_dt = datetime.strptime(recorded_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+
+        outdoor_rows.append(
+            {
+                "dt": recorded_dt,
+                "recorded_at": recorded_at,
+                "temp": row["outdoor_temp"],
+                "hum": row["outdoor_humidity"],
+            }
+        )
+
+    outdoor_rows.sort(key=lambda item: (item["dt"], item["recorded_at"]))
+
     result = []
     machine_pointer_map = {machine_id: 0 for machine_id in machine_ids}
+    outdoor_pointer = 0
     current_time = start_time.replace(microsecond=0)
 
     while current_time <= end_time:
@@ -611,6 +687,31 @@ def get_chart_data():
             "realFullTime": current_time_text,
             "interval": interval,
         }
+
+        item[f"moldTemp_{OUTDOOR_CHART_ID}"] = None
+        item[f"temp_{OUTDOOR_CHART_ID}"] = None
+        item[f"hum_{OUTDOOR_CHART_ID}"] = None
+        item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = False
+        item[f"recordedAt_{OUTDOOR_CHART_ID}"] = None
+
+        while outdoor_pointer < len(outdoor_rows) and outdoor_rows[outdoor_pointer]["dt"] <= current_time:
+            outdoor_pointer += 1
+
+        latest_outdoor = outdoor_rows[outdoor_pointer - 1] if outdoor_pointer > 0 else None
+
+        if latest_outdoor:
+            outdoor_diff_seconds = (current_time - latest_outdoor["dt"]).total_seconds()
+
+            if outdoor_diff_seconds < disconnect_after_seconds:
+                item[f"temp_{OUTDOOR_CHART_ID}"] = latest_outdoor["temp"]
+                item[f"hum_{OUTDOOR_CHART_ID}"] = latest_outdoor["hum"]
+                item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = False
+                item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
+            else:
+                item[f"temp_{OUTDOOR_CHART_ID}"] = None
+                item[f"hum_{OUTDOOR_CHART_ID}"] = None
+                item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = True
+                item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
 
         for machine_id in machine_ids:
             machine_rows = rows_by_machine.get(machine_id, [])
@@ -640,8 +741,6 @@ def get_chart_data():
                 item[f"isDisconnected_{machine_id}"] = False
                 item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
             else:
-                # Máy mất kết nối thì trả None để biểu đồ đứt đoạn,
-                # không trả 0 vì sẽ làm line tụt xuống 0.
                 item[f"moldTemp_{machine_id}"] = None
                 item[f"temp_{machine_id}"] = None
                 item[f"hum_{machine_id}"] = None
@@ -653,6 +752,7 @@ def get_chart_data():
 
     return jsonify(result)
 
+
 @machine_bp.route("/api/sensor-readings", methods=["POST"])
 def create_sensor_reading():
     body = request.get_json() or {}
@@ -661,10 +761,7 @@ def create_sensor_reading():
     missing = [field for field in required_fields if field not in body]
 
     if missing:
-        return jsonify({
-            "message": "Thiếu dữ liệu",
-            "missing": missing
-        }), 400
+        return jsonify({"message": "Missing data", "missing": missing}), 400
 
     machine_id = int(body["machineId"])
     mold_temp = float(body["moldTemp"])
@@ -674,9 +771,7 @@ def create_sensor_reading():
     machine = get_machine_by_id(machine_id)
 
     if not machine:
-        return jsonify({
-            "message": "Không tìm thấy máy hoặc máy không active"
-        }), 404
+        return jsonify({"message": "Machine not found or inactive"}), 404
 
     with get_setting_machine_db() as setting_conn:
         status = calculate_status_for_reading(
@@ -690,7 +785,8 @@ def create_sensor_reading():
     recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_machine_db() as machine_conn:
-        cursor = machine_conn.execute("""
+        cursor = machine_conn.execute(
+            """
             INSERT INTO sensor_readings (
                 machine_id,
                 mold_temp,
@@ -699,13 +795,15 @@ def create_sensor_reading():
                 recorded_at
             )
             VALUES (?, ?, ?, ?, ?);
-        """, (
-            machine_id,
-            mold_temp,
-            env_temp,
-            humidity,
-            recorded_at,
-        ))
+            """,
+            (
+                machine_id,
+                mold_temp,
+                env_temp,
+                humidity,
+                recorded_at,
+            ),
+        )
 
         sensor_id = cursor.lastrowid
         machine_conn.commit()
@@ -721,23 +819,27 @@ def create_sensor_reading():
             occurred_at=recorded_at,
         )
 
-    return jsonify({
-        "message": "Lưu dữ liệu PLC thành công",
-        "id": sensor_id,
-        "status": status,
-        "recordedAt": recorded_at,
-    })
+    return jsonify(
+        {
+            "message": "Saved PLC data successfully",
+            "id": sensor_id,
+            "status": status,
+            "recordedAt": recorded_at,
+        }
+    )
 
 
 @machine_bp.route("/api/sensor-readings/fake", methods=["POST"])
 def create_fake_sensor_readings():
     with get_machine_db() as machine_conn:
-        machines = machine_conn.execute("""
+        machines = machine_conn.execute(
+            """
             SELECT id, machine_name
             FROM machines
             WHERE is_active = 1
             ORDER BY id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
     inserted = 0
     warning_count = 0
@@ -759,7 +861,8 @@ def create_fake_sensor_readings():
 
             recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            machine_conn.execute("""
+            machine_conn.execute(
+                """
                 INSERT INTO sensor_readings (
                     machine_id,
                     mold_temp,
@@ -768,13 +871,15 @@ def create_fake_sensor_readings():
                     recorded_at
                 )
                 VALUES (?, ?, ?, ?, ?);
-            """, (
-                machine_id,
-                mold_temp,
-                env_temp,
-                humidity,
-                recorded_at,
-            ))
+                """,
+                (
+                    machine_id,
+                    mold_temp,
+                    env_temp,
+                    humidity,
+                    recorded_at,
+                ),
+            )
 
             if status == "warning":
                 warning_count += 1
@@ -795,12 +900,14 @@ def create_fake_sensor_readings():
         machine_conn.commit()
         setting_conn.commit()
 
-    return jsonify({
-        "message": "Đã tạo dữ liệu fake cho toàn bộ máy",
-        "inserted": inserted,
-        "warning": warning_count,
-        "alarm": alarm_count,
-    })
+    return jsonify(
+        {
+            "message": "Created fake data for all machines",
+            "inserted": inserted,
+            "warning": warning_count,
+            "alarm": alarm_count,
+        }
+    )
 
 
 @machine_bp.route("/api/sensor-readings/fake-history", methods=["POST"])
@@ -814,12 +921,14 @@ def create_fake_history():
     start_time = now - timedelta(minutes=minutes)
 
     with get_machine_db() as machine_conn:
-        machines = machine_conn.execute("""
+        machines = machine_conn.execute(
+            """
             SELECT id, machine_name
             FROM machines
             WHERE is_active = 1
             ORDER BY id ASC;
-        """).fetchall()
+            """
+        ).fetchall()
 
     inserted = 0
     warning_count = 0
@@ -843,7 +952,8 @@ def create_fake_history():
                     humidity,
                 )
 
-                machine_conn.execute("""
+                machine_conn.execute(
+                    """
                     INSERT INTO sensor_readings (
                         machine_id,
                         mold_temp,
@@ -852,13 +962,15 @@ def create_fake_history():
                         recorded_at
                     )
                     VALUES (?, ?, ?, ?, ?);
-                """, (
-                    machine_id,
-                    mold_temp,
-                    env_temp,
-                    humidity,
-                    current_time_text,
-                ))
+                    """,
+                    (
+                        machine_id,
+                        mold_temp,
+                        env_temp,
+                        humidity,
+                        current_time_text,
+                    ),
+                )
 
                 if status == "warning":
                     warning_count += 1
@@ -882,14 +994,16 @@ def create_fake_history():
         machine_conn.commit()
         setting_conn.commit()
 
-    return jsonify({
-        "message": "Đã tạo fake history",
-        "minutes": minutes,
-        "stepSeconds": step_seconds,
-        "inserted": inserted,
-        "warning": warning_count,
-        "alarm": alarm_count,
-    })
+    return jsonify(
+        {
+            "message": "Created fake history",
+            "minutes": minutes,
+            "stepSeconds": step_seconds,
+            "inserted": inserted,
+            "warning": warning_count,
+            "alarm": alarm_count,
+        }
+    )
 
 
 @machine_bp.route("/api/outdoor-weather/latest", methods=["GET"])
@@ -899,7 +1013,8 @@ def get_latest_outdoor_weather():
     now = datetime.now()
 
     with get_machine_db() as conn:
-        row = conn.execute("""
+        row = conn.execute(
+            """
             SELECT
                 id,
                 outdoor_temp,
@@ -908,36 +1023,35 @@ def get_latest_outdoor_weather():
             FROM outdoor_weather_readings
             ORDER BY recorded_at DESC, id DESC
             LIMIT 1;
-        """).fetchone()
+            """
+        ).fetchone()
 
     if not row:
-        return jsonify({
-            "id": None,
-            "temp": None,
-            "hum": None,
-            "recordedAt": None,
-            "isDisconnected": True
-        })
-
-    try:
-        recorded_at = datetime.strptime(
-            row["recorded_at"],
-            "%Y-%m-%d %H:%M:%S"
+        return jsonify(
+            {
+                "id": None,
+                "temp": None,
+                "hum": None,
+                "recordedAt": None,
+                "isDisconnected": True,
+            }
         )
 
-        disconnected = (
-            now - recorded_at
-        ).total_seconds() > disconnect_after_seconds
+    try:
+        recorded_at = datetime.strptime(row["recorded_at"], "%Y-%m-%d %H:%M:%S")
+        disconnected = (now - recorded_at).total_seconds() > disconnect_after_seconds
     except Exception:
         disconnected = True
 
-    return jsonify({
-        "id": row["id"],
-        "temp": None if disconnected else row["outdoor_temp"],
-        "hum": None if disconnected else row["outdoor_humidity"],
-        "recordedAt": row["recorded_at"],
-        "isDisconnected": disconnected
-    })
+    return jsonify(
+        {
+            "id": row["id"],
+            "temp": None if disconnected else row["outdoor_temp"],
+            "hum": None if disconnected else row["outdoor_humidity"],
+            "recordedAt": row["recorded_at"],
+            "isDisconnected": disconnected,
+        }
+    )
 
 
 @machine_bp.route("/api/outdoor-weather", methods=["POST"])
@@ -948,10 +1062,7 @@ def create_outdoor_weather():
     missing = [field for field in required_fields if field not in body]
 
     if missing:
-        return jsonify({
-            "message": "Thiếu dữ liệu",
-            "missing": missing
-        }), 400
+        return jsonify({"message": "Missing data", "missing": missing}), 400
 
     outdoor_temp = float(body["temp"])
     outdoor_humidity = float(body["hum"])
@@ -959,25 +1070,30 @@ def create_outdoor_weather():
     recorded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with get_machine_db() as conn:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             INSERT INTO outdoor_weather_readings (
                 outdoor_temp,
                 outdoor_humidity,
                 recorded_at
             )
             VALUES (?, ?, ?);
-        """, (
-            outdoor_temp,
-            outdoor_humidity,
-            recorded_at,
-        ))
+            """,
+            (
+                outdoor_temp,
+                outdoor_humidity,
+                recorded_at,
+            ),
+        )
 
         conn.commit()
 
-    return jsonify({
-        "message": "Lưu dữ liệu ngoài trời thành công",
-        "id": cursor.lastrowid,
-        "temp": outdoor_temp,
-        "hum": outdoor_humidity,
-        "recordedAt": recorded_at,
-    })
+    return jsonify(
+        {
+            "message": "Saved outdoor weather successfully",
+            "id": cursor.lastrowid,
+            "temp": outdoor_temp,
+            "hum": outdoor_humidity,
+            "recordedAt": recorded_at,
+        }
+    )

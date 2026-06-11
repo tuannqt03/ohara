@@ -14,9 +14,9 @@ TOTAL_DEVICES = 78  # 3 biến môi trường + 25 máy * 3 biến
 def build_fake_registers():
     """Tạo dữ liệu giả lập giống PLC thật: giá trị thực * 100."""
 
-    # Môi trường ngoài trời = 0
-    outdoor_temp = 0
-    outdoor_humidity = 0
+    # Môi trường ngoài trời fake dữ liệu thật
+    outdoor_temp = 29.0 + random.uniform(-1.5, 1.5)       # khoảng 27.5°C - 30.5°C
+    outdoor_humidity = 60.0 + random.uniform(-5.0, 5.0)   # khoảng 55% - 65%
 
     values = [
         int(outdoor_temp * 100),
@@ -47,7 +47,6 @@ def build_fake_registers():
         ])
 
     return values[:TOTAL_DEVICES]
-
 
 def parse_rds_command(command: str):
     """Parse lệnh dạng: RDS DM2000.U 78"""
@@ -122,7 +121,9 @@ def main():
     print("⚙️ Máy ID 16 đến 24 = 0 hết")
     print("⛔ Nhấn Ctrl+C để dừng")
     print("=" * 60)
-
+    print("⚙️ Outside Temp/Humidity = fake random")
+    print("⚙️ Mold Temp tất cả máy = 0")
+    print("⚙️ Máy ID 16 đến 24 = 0 hết")
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
