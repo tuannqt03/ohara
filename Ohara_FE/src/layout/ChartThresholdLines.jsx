@@ -1,6 +1,14 @@
-const THRESHOLD_COLORS = {
-  warning: "#FFD700",
-  alarm: "#c90909",
+const THRESHOLD_LINE_STYLES = {
+  warning: {
+    type: "dashed",
+    width: 1.3,
+    opacity: 0.58,
+  },
+  alarm: {
+    type: "dotted",
+    width: 1.8,
+    opacity: 0.82,
+  },
 };
 
 const CHART_THRESHOLD_CONFIG = {
@@ -34,6 +42,7 @@ const escapeHtml = (value) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+
 const toFiniteNumber = (value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
@@ -62,7 +71,7 @@ export const formatThresholdTooltip = (metaInput = {}) => {
   const first = metas[0];
   const typeText = getThresholdTypeText(first.level, first.side);
   const chartLabel = first.chartLabel || "Threshold";
-  const titleColor = first.lineColor || "#111827";
+  const titleColor = first.lineColor || first.machineColor || "#111827";
 
   const machineRows = metas
     .map((meta) => {
@@ -70,6 +79,7 @@ export const formatThresholdTooltip = (metaInput = {}) => {
       const machineValueText = formatThresholdValue(meta.value);
       const machineUnit = meta.unit || "";
       const machineColor = meta.machineColor || "#111827";
+      const levelText = meta.level === "alarm" ? "Alarm" : "Warning";
 
       return `
         <div style="
@@ -91,6 +101,7 @@ export const formatThresholdTooltip = (metaInput = {}) => {
 
           <span>
             <b>${machineName}</b>: ${machineValueText}${machineUnit}
+            
           </span>
         </div>
       `;
@@ -127,69 +138,22 @@ export const buildThresholdMarkLines = ({
   const safeMachineIds = Array.isArray(selectedMachineIds)
     ? selectedMachineIds
     : [];
+  const settingGroups = new Map();
 
-  const groupedLines = new Map();
+  const getGroupMaxThresholdValue = ({ base, warningDelta, alarmDelta }) => {
+    const values = [];
 
-  const addThresholdLine = ({
-    machineName,
-    machineColor,
-    value,
-    base,
-    delta,
-    level,
-    side,
-    color,
-    opacity,
-  }) => {
-    const numericValue = Number(value);
-    if (!Number.isFinite(numericValue)) return;
-
-    const key = `${numericValue}|${level}|${side}|${color}`;
-
-    const meta = {
-      machineName,
-      machineColor,
-      lineColor: color,
-      chartLabel: config.label,
-      value: numericValue,
-      base,
-      delta,
-      level,
-      side,
-      unit: config.unit,
-    };
-
-    if (!groupedLines.has(key)) {
-      groupedLines.set(key, {
-        name: `${getThresholdTypeText(level, side)} ${formatThresholdValue(
-          numericValue
-        )}${config.unit}`,
-        yAxis: numericValue,
-        thresholdMeta: [meta],
-        lineStyle: {
-          color,
-          width: 1.2,
-          type: "solid",
-          opacity,
-        },
-        emphasis: {
-          lineStyle: {
-            color,
-            width: 2.4,
-            opacity: 0.95,
-          },
-        },
-        label: {
-          formatter: formatThresholdValue(numericValue),
-          color,
-          fontWeight: 700,
-        },
-      });
-
-      return;
+    if (warningDelta !== null && warningDelta > 0) {
+      values.push(base - warningDelta, base + warningDelta);
     }
 
-    groupedLines.get(key).thresholdMeta.push(meta);
+    if (alarmDelta !== null && alarmDelta > 0) {
+      values.push(base - alarmDelta, base + alarmDelta);
+    }
+
+    if (values.length === 0) return base;
+
+    return Math.max(...values);
   };
 
   safeMachineIds.forEach((machineId) => {
@@ -203,58 +167,161 @@ export const buildThresholdMarkLines = ({
 
     if (base === null) return;
 
+    const safeWarningDelta = warningDelta !== null ? warningDelta : null;
+    const safeAlarmDelta = alarmDelta !== null ? alarmDelta : null;
+
+    const groupKey = [
+      base,
+      safeWarningDelta,
+      safeAlarmDelta,
+    ].join("|");
+
     const machineName = machineNameMap?.[machineId] || `Machine ${machineId}`;
     const machineColor = machineColorMap?.[machineId] || "#111827";
 
+    const machineMeta = {
+      machineId,
+      machineName,
+      machineColor,
+    };
+
+    if (!settingGroups.has(groupKey)) {
+      settingGroups.set(groupKey, {
+        base,
+        warningDelta: safeWarningDelta,
+        alarmDelta: safeAlarmDelta,
+        maxThresholdValue: getGroupMaxThresholdValue({
+          base,
+          warningDelta: safeWarningDelta,
+          alarmDelta: safeAlarmDelta,
+        }),
+        machines: [machineMeta],
+      });
+
+      return;
+    }
+
+    settingGroups.get(groupKey).machines.push(machineMeta);
+  });
+
+  const allGroups = Array.from(settingGroups.values());
+
+  if (allGroups.length === 0) return [];
+
+  const visibleGroups =
+  safeMachineIds.length === 1
+    ? allGroups
+    : allGroups.filter((group) => group.machines.length >= 2);
+
+  const groupedLines = new Map();
+
+  const addThresholdLine = ({
+    group,
+    value,
+    delta,
+    level,
+    side,
+  }) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return;
+
+    const firstMachine = group.machines[0];
+    const safeLineColor = firstMachine?.machineColor || "#111827";
+
+    const lineStyleConfig =
+      THRESHOLD_LINE_STYLES[level] || THRESHOLD_LINE_STYLES.warning;
+
+    const key = `${numericValue}|${level}|${side}|${safeLineColor}|${lineStyleConfig.type}`;
+
+    const metas = group.machines.map((machine) => ({
+      machineName: machine.machineName,
+      machineColor: machine.machineColor,
+      lineColor: safeLineColor,
+      chartLabel: config.label,
+      value: numericValue,
+      base: group.base,
+      delta,
+      level,
+      side,
+      unit: config.unit,
+    }));
+
+    if (!groupedLines.has(key)) {
+      const lineTitle =
+        group.machines.length >= 2
+          ? `${firstMachine.machineName} +${group.machines.length - 1}`
+          : firstMachine.machineName;
+
+      groupedLines.set(key, {
+        name: `${lineTitle} ${getThresholdTypeText(
+          level,
+          side
+        )} ${formatThresholdValue(numericValue)}${config.unit}`,
+        yAxis: numericValue,
+        thresholdMeta: metas,
+        lineStyle: {
+          color: safeLineColor,
+          width: lineStyleConfig.width,
+          type: lineStyleConfig.type,
+          opacity: lineStyleConfig.opacity,
+        },
+        emphasis: {
+          lineStyle: {
+            color: safeLineColor,
+            width: lineStyleConfig.width + 0.9,
+            type: lineStyleConfig.type,
+            opacity: 1,
+          },
+        },
+        label: {
+          formatter: formatThresholdValue(numericValue),
+          color: safeLineColor,
+          fontWeight: 700,
+        },
+      });
+
+      return;
+    }
+
+    groupedLines.get(key).thresholdMeta.push(...metas);
+  };
+
+  visibleGroups.forEach((group) => {
+    const { base, warningDelta, alarmDelta } = group;
+
     if (warningDelta !== null && warningDelta > 0) {
       addThresholdLine({
-        machineName,
-        machineColor,
+        group,
         value: base - warningDelta,
-        base,
         delta: warningDelta,
         level: "warning",
         side: "low",
-        color: THRESHOLD_COLORS.warning,
-        opacity: 0.55,
       });
 
       addThresholdLine({
-        machineName,
-        machineColor,
+        group,
         value: base + warningDelta,
-        base,
         delta: warningDelta,
         level: "warning",
         side: "high",
-        color: THRESHOLD_COLORS.warning,
-        opacity: 0.55,
       });
     }
 
     if (alarmDelta !== null && alarmDelta > 0) {
       addThresholdLine({
-        machineName,
-        machineColor,
+        group,
         value: base - alarmDelta,
-        base,
         delta: alarmDelta,
         level: "alarm",
         side: "low",
-        color: THRESHOLD_COLORS.alarm,
-        opacity: 0.68,
       });
 
       addThresholdLine({
-        machineName,
-        machineColor,
+        group,
         value: base + alarmDelta,
-        base,
         delta: alarmDelta,
         level: "alarm",
         side: "high",
-        color: THRESHOLD_COLORS.alarm,
-        opacity: 0.68,
       });
     }
   });

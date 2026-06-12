@@ -124,6 +124,7 @@ export default function WarningLogDialog({
       date: fromDate,
       machine: searchMachine,
       machineId: selectedMachine?.id || "",
+      onlyActive: "1",
     });
 
     setLogs(Array.isArray(res.data) ? res.data : []);
@@ -337,7 +338,7 @@ export default function WarningLogDialog({
             <MenuItem value="alarm">Alarm</MenuItem>
           </TextField>
 
-          <TextField
+          {/* <TextField
             size="small"
             type="date"
             label="Date"
@@ -360,7 +361,7 @@ export default function WarningLogDialog({
                 cursor: "pointer",
               },
             }}
-          />
+          /> */}
           <Box sx={{ flex: 1 }} />
         </Paper>
 

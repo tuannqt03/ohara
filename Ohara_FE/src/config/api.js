@@ -79,7 +79,7 @@ export const temperatureHumidityApi = {
     });
   },
 
-  // Xoá mềm warning/alarm logs
+  // Xoá warning/alarm logs
   deleteWarningLogs: () => {
     return api.delete("/api/warning-logs");
   },
