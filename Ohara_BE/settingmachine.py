@@ -131,7 +131,11 @@ def ensure_warning_log_columns():
                 ALTER TABLE warning_alarm_logs
                 ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
             """)
-
+        if "resolved_at" not in column_names:
+            conn.execute("""
+                ALTER TABLE warning_alarm_logs
+                ADD COLUMN resolved_at DATETIME;
+            """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_warning_logs_active
             ON warning_alarm_logs (is_deleted, is_confirmed, machine_id, occurred_at DESC);
@@ -398,8 +402,9 @@ def get_active_alarm_map(conn):
             FROM warning_alarm_logs
             WHERE COALESCE(is_deleted, 0) = 0
               AND COALESCE(is_confirmed, 0) = 0
+              AND resolved_at IS NULL
             GROUP BY machine_id
-        ) active
+        ) activeWHERE COALESCE(l.is_deleted, 0) = 0
             ON active.machine_id = l.machine_id
            AND active.max_level = CASE l.status
                 WHEN 'alarm' THEN 2
@@ -408,6 +413,7 @@ def get_active_alarm_map(conn):
            END
         WHERE COALESCE(l.is_deleted, 0) = 0
           AND COALESCE(l.is_confirmed, 0) = 0
+          AND l.resolved_at IS NULL
         ORDER BY l.machine_id ASC, l.occurred_at DESC, l.id DESC;
     """).fetchall()
 
@@ -428,6 +434,7 @@ def get_active_unconfirmed_log(conn, machine_id):
         WHERE machine_id = ?
           AND COALESCE(is_deleted, 0) = 0
           AND COALESCE(is_confirmed, 0) = 0
+          AND resolved_at IS NULL
         ORDER BY
             CASE status
                 WHEN 'alarm' THEN 2
@@ -438,7 +445,6 @@ def get_active_unconfirmed_log(conn, machine_id):
             id DESC
         LIMIT 1;
     """, (machine_id,)).fetchone()
-
 @settingmachine_bp.route("/api/settings/threshold", methods=["GET"])
 def get_threshold_setting():
     machine_id = request.args.get("machineId", type=int)
@@ -655,6 +661,7 @@ def get_warning_logs():
             status,
             message,
             occurred_at,
+            resolved_at,
             COALESCE(is_confirmed, 0) AS is_confirmed,
             confirmed_at,
             confirmed_by
@@ -665,7 +672,7 @@ def get_warning_logs():
     params = []
 
     if only_active in ["1", "true", "True"]:
-        query += " AND COALESCE(is_confirmed, 0) = 0"
+        query += " AND resolved_at IS NULL"
 
     if machine_id:
         query += " AND machine_id = ?"
@@ -699,6 +706,7 @@ def get_warning_logs():
             "machineId": row["machine_id"],
             "machineName": machine_name,
             "time": row["occurred_at"],
+            "resolvedAt": row["resolved_at"],
             "moldTemp": row["mold_temp"],
             "envTemp": row["env_temp"],
             "hum": row["humidity"],
@@ -773,7 +781,8 @@ def confirm_machine_alerts(machine_id):
                 confirmed_by = ?
             WHERE machine_id = ?
               AND COALESCE(is_deleted, 0) = 0
-              AND COALESCE(is_confirmed, 0) = 0;
+              AND COALESCE(is_confirmed, 0) = 0
+              AND resolved_at IS NULL;
         """, (
             confirmed_by,
             machine_id,
@@ -791,9 +800,7 @@ def confirm_machine_alerts(machine_id):
 def delete_warning_logs():
     with get_setting_machine_db() as conn:
         conn.execute("""
-            UPDATE warning_alarm_logs
-            SET is_deleted = 1
-            WHERE COALESCE(is_deleted, 0) = 0;
+            DELETE FROM warning_alarm_logs;
         """)
         conn.commit()
 

@@ -94,9 +94,15 @@ def ensure_warning_alarm_logs_schema(setting_conn):
             ADD COLUMN resolved_at TEXT;
             """
         )
-        setting_conn.commit()
+    setting_conn.execute(
+        """
+        DELETE FROM warning_alarm_logs
+        WHERE COALESCE(is_deleted, 0) = 1
+           OR resolved_at IS NOT NULL;
+        """
+    )
 
-
+    setting_conn.commit()
 def build_warning_message(mold_temp, env_temp, humidity, threshold):
     warning_parts = []
 
@@ -132,19 +138,15 @@ def create_warning_log_if_needed(
 
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Khi máy về normal: xoá thật log active để DB không phình.
     if status == "normal":
         setting_conn.execute(
             """
-            UPDATE warning_alarm_logs
-            SET resolved_at = ?
+            DELETE FROM warning_alarm_logs
             WHERE machine_id = ?
-              AND COALESCE(is_deleted, 0) = 0
               AND resolved_at IS NULL;
             """,
-            (
-                occurred_at_text,
-                machine["id"],
-            ),
+            (machine["id"],),
         )
 
         setting_conn.commit()
@@ -178,7 +180,31 @@ def create_warning_log_if_needed(
         (machine["id"],),
     ).fetchone()
 
+    # Nếu đang có log active thì chỉ UPDATE.
+    # Warning -> Alarm hoặc Alarm -> Warning không sinh thêm dòng mới.
     if active_log:
+        setting_conn.execute(
+            """
+            UPDATE warning_alarm_logs
+            SET
+                mold_temp = ?,
+                env_temp = ?,
+                humidity = ?,
+                status = ?,
+                message = ?
+            WHERE id = ?;
+            """,
+            (
+                mold_temp,
+                env_temp,
+                humidity,
+                status,
+                message,
+                active_log["id"],
+            ),
+        )
+
+        setting_conn.commit()
         return active_log["id"]
 
     cursor = setting_conn.execute(
@@ -209,7 +235,6 @@ def create_warning_log_if_needed(
 
     setting_conn.commit()
     return cursor.lastrowid
-
 
 def calculate_status_for_reading(setting_conn, machine_id, mold_temp, env_temp, humidity):
     threshold = get_threshold_for_machine(setting_conn, machine_id)

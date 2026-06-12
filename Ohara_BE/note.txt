@@ -72,3 +72,41 @@ Bật tự khởi động khi mở máy
 sudo systemctl enable ohara-be
 sudo systemctl enable ohara-plc
 sudo systemctl enable ohara-fe
+
+
+
+Tạo file khoi dong phan mem doc nhiet do va do am ngoai troi
+
+sudo nano /etc/systemd/system/OutsideEnv.service
+
+Dán nội dung này:
+
+[Unit]
+Description=OutsideEnv Python Service
+After=network.target
+
+[Service]
+Type=simple
+User=ohara
+WorkingDirectory=/home/ohara/ohara/Ohara_BE
+
+ExecStart=/home/ohara/ohara/Ohara_BE/env/bin/python /home/ohara/ohara/Ohara_BE/OutSiteEnv.py
+
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+Sau đó chạy:
+
+sudo systemctl daemon-reload
+sudo systemctl enable OutsideEnv.service
+sudo systemctl start OutsideEnv.service
+
+systemctl stop OutsideEnv.service
+
+Kiểm tra trạng thái:
+
+sudo systemctl status OutsideEnv.service
