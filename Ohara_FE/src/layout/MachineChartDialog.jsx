@@ -1867,7 +1867,15 @@ function ChartBox({
     return safeSelectedMachines;
   }, [dataPrefix, safeSelectedMachines]);
 
-  const disconnectedCount = disconnectedMachineIds?.length || 0;
+  const disconnectedCount = useMemo(() => {
+    const latestRow = safeData.length > 0 ? safeData[safeData.length - 1] : null;
+
+    if (!latestRow) return 0;
+
+    return plottableSelectedMachines.filter((id) =>
+      Boolean(latestRow[`isDisconnected_${id}`])
+    ).length;
+  }, [safeData, plottableSelectedMachines]);
   const rowByTimeMap = useMemo(() => {
     const map = new Map();
 
@@ -2341,7 +2349,7 @@ function ChartBox({
             pointerEvents: "none",
           }}
         >
-          Disconnected: {disconnectedCount} machines
+          Disconnected: {disconnectedCount} items
         </Box>
       )}
 
