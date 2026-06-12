@@ -708,11 +708,11 @@ def get_chart_data():
                 item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = False
                 item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
             else:
-                item[f"temp_{OUTDOOR_CHART_ID}"] = None
-                item[f"hum_{OUTDOOR_CHART_ID}"] = None
+                # Khi mất kết nối: giữ giá trị cuối cùng để biểu đồ vẽ thành đường thẳng liền
+                item[f"temp_{OUTDOOR_CHART_ID}"] = latest_outdoor["temp"]
+                item[f"hum_{OUTDOOR_CHART_ID}"] = latest_outdoor["hum"]
                 item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = True
                 item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
-
         for machine_id in machine_ids:
             machine_rows = rows_by_machine.get(machine_id, [])
             pointer = machine_pointer_map.get(machine_id, 0)
@@ -741,12 +741,12 @@ def get_chart_data():
                 item[f"isDisconnected_{machine_id}"] = False
                 item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
             else:
-                item[f"moldTemp_{machine_id}"] = None
-                item[f"temp_{machine_id}"] = None
-                item[f"hum_{machine_id}"] = None
+                # Khi mất kết nối: giữ giá trị cuối cùng để biểu đồ vẽ thành đường thẳng liền
+                item[f"moldTemp_{machine_id}"] = latest_row["mold_temp"]
+                item[f"temp_{machine_id}"] = latest_row["env_temp"]
+                item[f"hum_{machine_id}"] = latest_row["humidity"]
                 item[f"isDisconnected_{machine_id}"] = True
                 item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
-
         result.append(item)
         current_time += timedelta(seconds=interval)
 
