@@ -29,15 +29,30 @@ def default_sql(key):
     return DEFAULT_MACHINE_THRESHOLDS[key]
 
 
+SQLITE_TIMEOUT_SECONDS = 15
+SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
+
+
+def configure_sqlite_connection(conn):
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    return conn
+
+
 def get_setting_machine_db():
     db_path = current_app.config.get(
         "SETTING_MACHINE_DB_PATH",
         Path(__file__).resolve().parent / "database" / "settingmachine.db"
     )
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+        check_same_thread=False,
+    )
+    return configure_sqlite_connection(conn)
 
 def ensure_global_threshold_table():
     with get_setting_machine_db() as conn:
@@ -81,8 +96,12 @@ def get_global_threshold(conn):
 def ensure_warning_log_columns():
     db_path = Path(__file__).resolve().parent / "database" / "settingmachine.db"
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+        check_same_thread=False,
+    )
+    configure_sqlite_connection(conn)
 
     try:
         conn.execute("""
@@ -233,14 +252,17 @@ def normalize_threshold_row(row):
 
 
 def get_threshold_for_machine(conn, machine_id):
-    ensure_machine_threshold_table()
-
-    row = conn.execute("""
-        SELECT *
-        FROM machine_threshold_settings
-        WHERE machine_id = ?
-        LIMIT 1;
-    """, (machine_id,)).fetchone()
+    try:
+        row = conn.execute("""
+            SELECT *
+            FROM machine_threshold_settings
+            WHERE machine_id = ?
+            LIMIT 1;
+        """, (machine_id,)).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error).lower():
+            raise
+        return DEFAULT_MACHINE_THRESHOLDS.copy()
 
     if row:
         return normalize_threshold_row(row)
@@ -404,7 +426,7 @@ def get_active_alarm_map(conn):
               AND COALESCE(is_confirmed, 0) = 0
               AND resolved_at IS NULL
             GROUP BY machine_id
-        ) activeWHERE COALESCE(l.is_deleted, 0) = 0
+        ) active
             ON active.machine_id = l.machine_id
            AND active.max_level = CASE l.status
                 WHEN 'alarm' THEN 2

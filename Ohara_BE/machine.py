@@ -15,6 +15,9 @@ from settingmachine import (
 machine_bp = Blueprint("machine", __name__)
 
 OUTDOOR_CHART_ID = "outdoor"
+SQLITE_TIMEOUT_SECONDS = 15
+SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
+FAKE_HISTORY_COMMIT_BATCH = 300
 
 
 def get_machine_db():
@@ -23,10 +26,34 @@ def get_machine_db():
         Path(__file__).resolve().parent / "database" / "machine.db",
     )
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(
+        db_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
+
+
+def ensure_machine_indexes():
+    with get_machine_db() as conn:
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sensor_readings_machine_time_id
+            ON sensor_readings (machine_id, recorded_at DESC, id DESC);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_outdoor_weather_time_id
+            ON outdoor_weather_readings (recorded_at DESC, id DESC);
+            """
+        )
+        conn.commit()
 
 
 def get_machine_by_id(machine_id):
@@ -94,15 +121,10 @@ def ensure_warning_alarm_logs_schema(setting_conn):
             ADD COLUMN resolved_at TEXT;
             """
         )
-    setting_conn.execute(
-        """
-        DELETE FROM warning_alarm_logs
-        WHERE COALESCE(is_deleted, 0) = 1
-           OR resolved_at IS NOT NULL;
-        """
-    )
 
     setting_conn.commit()
+
+
 def build_warning_message(mold_temp, env_temp, humidity, threshold):
     warning_parts = []
 
@@ -133,9 +155,8 @@ def create_warning_log_if_needed(
     humidity,
     status,
     occurred_at=None,
+    commit=True,
 ):
-    ensure_warning_alarm_logs_schema(setting_conn)
-
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Khi máy về normal: xoá thật log active để DB không phình.
@@ -149,7 +170,8 @@ def create_warning_log_if_needed(
             (machine["id"],),
         )
 
-        setting_conn.commit()
+        if commit:
+            setting_conn.commit()
         return None
 
     if status not in ["warning", "alarm"]:
@@ -204,7 +226,8 @@ def create_warning_log_if_needed(
             ),
         )
 
-        setting_conn.commit()
+        if commit:
+            setting_conn.commit()
         return active_log["id"]
 
     cursor = setting_conn.execute(
@@ -233,8 +256,10 @@ def create_warning_log_if_needed(
         ),
     )
 
-    setting_conn.commit()
+    if commit:
+        setting_conn.commit()
     return cursor.lastrowid
+
 
 def calculate_status_for_reading(setting_conn, machine_id, mold_temp, env_temp, humidity):
     threshold = get_threshold_for_machine(setting_conn, machine_id)
@@ -436,23 +461,7 @@ def get_latest_machines():
                     humidity,
                 )
 
-                create_warning_log_if_needed(
-                    setting_conn=setting_conn,
-                    machine=machine,
-                    mold_temp=mold_temp,
-                    env_temp=env_temp,
-                    humidity=humidity,
-                    status=calculated_status,
-                    occurred_at=latest["recorded_at"],
-                )
-
-            if disconnected:
-                display_status = "disconnected"
-            else:
-                display_status = calculated_status
-
-            active_log_id = None
-            need_confirm = False
+            display_status = "disconnected" if disconnected else calculated_status
 
             data.append(
                 {
@@ -728,16 +737,14 @@ def get_chart_data():
             outdoor_diff_seconds = (current_time - latest_outdoor["dt"]).total_seconds()
 
             if outdoor_diff_seconds < disconnect_after_seconds:
-                item[f"temp_{OUTDOOR_CHART_ID}"] = latest_outdoor["temp"]
-                item[f"hum_{OUTDOOR_CHART_ID}"] = latest_outdoor["hum"]
                 item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = False
-                item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
             else:
-                # Khi mất kết nối: giữ giá trị cuối cùng để biểu đồ vẽ thành đường thẳng liền
-                item[f"temp_{OUTDOOR_CHART_ID}"] = latest_outdoor["temp"]
-                item[f"hum_{OUTDOOR_CHART_ID}"] = latest_outdoor["hum"]
                 item[f"isDisconnected_{OUTDOOR_CHART_ID}"] = True
-                item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
+
+            item[f"temp_{OUTDOOR_CHART_ID}"] = latest_outdoor["temp"]
+            item[f"hum_{OUTDOOR_CHART_ID}"] = latest_outdoor["hum"]
+            item[f"recordedAt_{OUTDOOR_CHART_ID}"] = latest_outdoor["recorded_at"]
+
         for machine_id in machine_ids:
             machine_rows = rows_by_machine.get(machine_id, [])
             pointer = machine_pointer_map.get(machine_id, 0)
@@ -760,18 +767,16 @@ def get_chart_data():
             diff_seconds = (current_time - latest_row["dt"]).total_seconds()
 
             if diff_seconds < disconnect_after_seconds:
-                item[f"moldTemp_{machine_id}"] = latest_row["mold_temp"]
-                item[f"temp_{machine_id}"] = latest_row["env_temp"]
-                item[f"hum_{machine_id}"] = latest_row["humidity"]
                 item[f"isDisconnected_{machine_id}"] = False
-                item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
             else:
-                # Khi mất kết nối: giữ giá trị cuối cùng để biểu đồ vẽ thành đường thẳng liền
-                item[f"moldTemp_{machine_id}"] = latest_row["mold_temp"]
-                item[f"temp_{machine_id}"] = latest_row["env_temp"]
-                item[f"hum_{machine_id}"] = latest_row["humidity"]
                 item[f"isDisconnected_{machine_id}"] = True
-                item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
+
+            # Khi mất kết nối: vẫn giữ giá trị cuối cùng để biểu đồ vẽ thành đường thẳng liền.
+            item[f"moldTemp_{machine_id}"] = latest_row["mold_temp"]
+            item[f"temp_{machine_id}"] = latest_row["env_temp"]
+            item[f"hum_{machine_id}"] = latest_row["humidity"]
+            item[f"recordedAt_{machine_id}"] = latest_row["recorded_at"]
+
         result.append(item)
         current_time += timedelta(seconds=interval)
 
@@ -918,6 +923,7 @@ def create_fake_sensor_readings():
                 env_temp=env_temp,
                 humidity=humidity,
                 status=status,
+                commit=False,
             )
 
             inserted += 1
@@ -958,6 +964,7 @@ def create_fake_history():
     inserted = 0
     warning_count = 0
     alarm_count = 0
+    batch_count = 0
     current_time = start_time
 
     with get_machine_db() as machine_conn, get_setting_machine_db() as setting_conn:
@@ -1010,9 +1017,16 @@ def create_fake_history():
                     humidity=humidity,
                     status=status,
                     occurred_at=current_time_text,
+                    commit=False,
                 )
 
                 inserted += 1
+                batch_count += 1
+
+                if batch_count >= FAKE_HISTORY_COMMIT_BATCH:
+                    machine_conn.commit()
+                    setting_conn.commit()
+                    batch_count = 0
 
             current_time += timedelta(seconds=step_seconds)
 
