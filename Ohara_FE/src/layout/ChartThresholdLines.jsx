@@ -1,13 +1,13 @@
 const THRESHOLD_LINE_STYLES = {
   warning: {
     type: "dashed",
-    width: 1.3,
-    opacity: 0.58,
+    width: 1.2,
+    opacity: 0.7,
   },
   alarm: {
-    type: "dotted",
-    width: 1.8,
-    opacity: 0.82,
+    type: [2, 4, 14, 4],
+    width: 1.9,
+    opacity: 0.9,
   },
 };
 

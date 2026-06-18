@@ -1829,7 +1829,40 @@ function MachineSelectPanel({
     </Paper>
   );
 }
+function getThresholdLineSignature(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return "";
 
+  return lines
+    .map((line) => {
+      const yAxis = Number(line?.yAxis);
+      const meta = Array.isArray(line?.thresholdMeta)
+        ? line.thresholdMeta[0]
+        : line?.thresholdMeta;
+
+      const level =
+        meta?.level ||
+        meta?.type ||
+        meta?.thresholdType ||
+        meta?.alarmType ||
+        meta?.warningType ||
+        "";
+
+      const bound =
+        meta?.bound ||
+        meta?.direction ||
+        meta?.side ||
+        meta?.position ||
+        "";
+
+      return [
+        Number.isFinite(yAxis) ? yAxis.toFixed(6) : "",
+        String(level),
+        String(bound),
+      ].join("|");
+    })
+    .sort()
+    .join("||");
+}
 function ChartBox({
   chartKey,
   title,
@@ -1971,24 +2004,59 @@ function ChartBox({
       return acc;
     }, {});
   }, [plottableSelectedMachines, machineColors]);
+  const thresholdComparableMachineIds = useMemo(() => {
+    return plottableSelectedMachines.filter((machineId) => {
+      if (machineId === OUTDOOR_CHART_ID) return false;
 
-  const thresholdMarkLines = useMemo(
-    () =>
-      buildThresholdMarkLines({
-        chartKey,
-        thresholdSettingsByMachineId,
-        selectedMachineIds: plottableSelectedMachines,
-        machineNameMap,
-        machineColorMap,
-      }),
-    [
+      return Boolean(thresholdSettingsByMachineId?.[machineId]);
+    });
+  }, [plottableSelectedMachines, thresholdSettingsByMachineId]);
+  const thresholdMarkLines = useMemo(() => {
+  if (
+    !Array.isArray(thresholdComparableMachineIds) ||
+    thresholdComparableMachineIds.length === 0
+  ) {
+    return [];
+  }
+
+  const thresholdLinesByMachine = thresholdComparableMachineIds.map((machineId) =>
+    buildThresholdMarkLines({
       chartKey,
       thresholdSettingsByMachineId,
-      plottableSelectedMachines,
+      selectedMachineIds: [machineId],
       machineNameMap,
       machineColorMap,
-    ]
+    })
   );
+
+  const firstSignature = getThresholdLineSignature(thresholdLinesByMachine[0]);
+
+  if (!firstSignature) {
+    return [];
+  }
+
+  const allSameThreshold = thresholdLinesByMachine.every(
+    (lines) => getThresholdLineSignature(lines) === firstSignature
+  );
+
+  if (!allSameThreshold) {
+    return [];
+  }
+
+  return buildThresholdMarkLines({
+    chartKey,
+    thresholdSettingsByMachineId,
+    selectedMachineIds: [thresholdComparableMachineIds[0]],
+    machineNameMap,
+    machineColorMap,
+  });
+}, [
+  chartKey,
+  thresholdSettingsByMachineId,
+  thresholdComparableMachineIds,
+  machineNameMap,
+  machineColorMap,
+]);
 
   const thresholdValues = thresholdMarkLines
     .map((item) => Number(item.yAxis))
