@@ -121,7 +121,6 @@ export default function WarningLogDialog({
 
     const res = await temperatureHumidityApi.getWarningLogs({
       status: statusFilter,
-      date: fromDate,
       machine: searchMachine,
       machineId: selectedMachine?.id || "",
       onlyActive: "1",

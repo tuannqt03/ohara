@@ -2012,51 +2012,51 @@ function ChartBox({
     });
   }, [plottableSelectedMachines, thresholdSettingsByMachineId]);
   const thresholdMarkLines = useMemo(() => {
-  if (
-    !Array.isArray(thresholdComparableMachineIds) ||
-    thresholdComparableMachineIds.length === 0
-  ) {
-    return [];
-  }
+    if (
+      !Array.isArray(thresholdComparableMachineIds) ||
+      thresholdComparableMachineIds.length === 0
+    ) {
+      return [];
+    }
 
-  const thresholdLinesByMachine = thresholdComparableMachineIds.map((machineId) =>
-    buildThresholdMarkLines({
+    const thresholdLinesByMachine = thresholdComparableMachineIds.map((machineId) =>
+      buildThresholdMarkLines({
+        chartKey,
+        thresholdSettingsByMachineId,
+        selectedMachineIds: [machineId],
+        machineNameMap,
+        machineColorMap,
+      })
+    );
+
+    const firstSignature = getThresholdLineSignature(thresholdLinesByMachine[0]);
+
+    if (!firstSignature) {
+      return [];
+    }
+
+    const allSameThreshold = thresholdLinesByMachine.every(
+      (lines) => getThresholdLineSignature(lines) === firstSignature
+    );
+
+    if (!allSameThreshold) {
+      return [];
+    }
+
+    return buildThresholdMarkLines({
       chartKey,
       thresholdSettingsByMachineId,
-      selectedMachineIds: [machineId],
+      selectedMachineIds: thresholdComparableMachineIds,
       machineNameMap,
       machineColorMap,
-    })
-  );
-
-  const firstSignature = getThresholdLineSignature(thresholdLinesByMachine[0]);
-
-  if (!firstSignature) {
-    return [];
-  }
-
-  const allSameThreshold = thresholdLinesByMachine.every(
-    (lines) => getThresholdLineSignature(lines) === firstSignature
-  );
-
-  if (!allSameThreshold) {
-    return [];
-  }
-
-  return buildThresholdMarkLines({
+    });
+  }, [
     chartKey,
     thresholdSettingsByMachineId,
-    selectedMachineIds: [thresholdComparableMachineIds[0]],
+    thresholdComparableMachineIds,
     machineNameMap,
     machineColorMap,
-  });
-}, [
-  chartKey,
-  thresholdSettingsByMachineId,
-  thresholdComparableMachineIds,
-  machineNameMap,
-  machineColorMap,
-]);
+  ]);
 
   const thresholdValues = thresholdMarkLines
     .map((item) => Number(item.yAxis))
