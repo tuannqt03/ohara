@@ -18,6 +18,16 @@ OUTDOOR_CHART_ID = "outdoor"
 SQLITE_TIMEOUT_SECONDS = 15
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
 FAKE_HISTORY_COMMIT_BATCH = 300
+_WARNING_LOG_SCHEMA_READY = False
+_LAST_WARNING_SYNC_READING = {}
+_WARNING_SYNC_CACHE_READY = False
+
+
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        result = super().__exit__(exc_type, exc_value, traceback)
+        self.close()
+        return result
 
 
 def get_machine_db():
@@ -30,6 +40,7 @@ def get_machine_db():
         db_path,
         timeout=SQLITE_TIMEOUT_SECONDS,
         check_same_thread=False,
+        factory=ClosingConnection,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -40,20 +51,37 @@ def get_machine_db():
 
 
 def ensure_machine_indexes():
-    with get_machine_db() as conn:
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_sensor_readings_machine_time_id
-            ON sensor_readings (machine_id, recorded_at DESC, id DESC);
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_outdoor_weather_time_id
-            ON outdoor_weather_readings (recorded_at DESC, id DESC);
-            """
-        )
-        conn.commit()
+    try:
+        with get_machine_db() as conn:
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sensor_readings_machine_time_id
+                ON sensor_readings (machine_id, recorded_at DESC, id DESC);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sensor_readings_time_machine
+                ON sensor_readings (recorded_at DESC, machine_id, id DESC);
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_outdoor_weather_time_id
+                ON outdoor_weather_readings (recorded_at DESC, id DESC);
+                """
+            )
+            conn.commit()
+    except sqlite3.OperationalError as error:
+        # DB mới chưa có bảng thì bỏ qua, bảng tạo xong chạy lại sẽ tạo index được.
+        if "no such table" not in str(error).lower():
+            raise
+
+
+@machine_bp.record_once
+def setup_machine_runtime(state):
+    with state.app.app_context():
+        ensure_machine_indexes()
 
 
 def get_machine_by_id(machine_id):
@@ -106,6 +134,31 @@ def generate_safe_outdoor_values():
 
 
 def ensure_warning_alarm_logs_schema(setting_conn):
+    global _WARNING_LOG_SCHEMA_READY
+
+    if _WARNING_LOG_SCHEMA_READY:
+        return
+
+    setting_conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS warning_alarm_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            machine_id INTEGER NOT NULL,
+            mold_temp REAL NOT NULL,
+            env_temp REAL NOT NULL,
+            humidity REAL NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('warning', 'alarm')),
+            message TEXT,
+            occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            resolved_at DATETIME,
+            is_confirmed INTEGER NOT NULL DEFAULT 0,
+            confirmed_at DATETIME,
+            confirmed_by TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+
     columns = setting_conn.execute(
         """
         PRAGMA table_info(warning_alarm_logs);
@@ -114,15 +167,70 @@ def ensure_warning_alarm_logs_schema(setting_conn):
 
     column_names = {column["name"] for column in columns}
 
-    if "resolved_at" not in column_names:
-        setting_conn.execute(
-            """
-            ALTER TABLE warning_alarm_logs
-            ADD COLUMN resolved_at TEXT;
-            """
-        )
+    columns_to_add = [
+        ("resolved_at", "DATETIME"),
+        ("is_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+        ("confirmed_at", "DATETIME"),
+        ("confirmed_by", "TEXT"),
+        ("is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+
+    for column_name, column_def in columns_to_add:
+        if column_name not in column_names:
+            setting_conn.execute(
+                f"""
+                ALTER TABLE warning_alarm_logs
+                ADD COLUMN {column_name} {column_def};
+                """
+            )
+
+    setting_conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_warning_logs_active
+        ON warning_alarm_logs (is_deleted, machine_id, resolved_at, occurred_at DESC, id DESC);
+        """
+    )
+
+    setting_conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_warning_logs_filter
+        ON warning_alarm_logs (is_deleted, machine_id, status, occurred_at DESC, id DESC);
+        """
+    )
+
+    # Dọn dữ liệu cũ nếu trước đây một máy bị sinh nhiều log active.
+    # Giữ lại dòng active mới nhất theo id cho mỗi máy, xoá các dòng active trùng.
+    setting_conn.execute(
+        """
+        DELETE FROM warning_alarm_logs
+        WHERE COALESCE(is_deleted, 0) = 0
+          AND resolved_at IS NULL
+          AND id NOT IN (
+              SELECT keep_id
+              FROM (
+                  SELECT MAX(id) AS keep_id
+                  FROM warning_alarm_logs
+                  WHERE COALESCE(is_deleted, 0) = 0
+                    AND resolved_at IS NULL
+                  GROUP BY machine_id
+              ) kept
+          );
+        """
+    )
+
+    # Ép DB chỉ cho phép mỗi máy có tối đa 1 log active.
+    # Nhờ vậy dù request bị gọi song song cũng không thể sinh nhiều dòng active.
+    setting_conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_warning_logs_one_active_per_machine
+        ON warning_alarm_logs (machine_id)
+        WHERE resolved_at IS NULL
+          AND COALESCE(is_deleted, 0) = 0;
+        """
+    )
 
     setting_conn.commit()
+    _WARNING_LOG_SCHEMA_READY = True
 
 
 def build_warning_message(mold_temp, env_temp, humidity, threshold):
@@ -157,20 +265,23 @@ def create_warning_log_if_needed(
     occurred_at=None,
     commit=True,
 ):
+    ensure_warning_alarm_logs_schema(setting_conn)
+
     occurred_at_text = occurred_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Khi máy về normal: xoá thật log active để DB không phình.
     if status == "normal":
-        setting_conn.execute(
+        cursor = setting_conn.execute(
             """
             DELETE FROM warning_alarm_logs
             WHERE machine_id = ?
+              AND COALESCE(is_deleted, 0) = 0
               AND resolved_at IS NULL;
             """,
             (machine["id"],),
         )
 
-        if commit:
+        if commit and cursor.rowcount > 0:
             setting_conn.commit()
         return None
 
@@ -202,9 +313,25 @@ def create_warning_log_if_needed(
         (machine["id"],),
     ).fetchone()
 
-    # Nếu đang có log active thì chỉ UPDATE.
+    # Nếu đang có log active thì chỉ UPDATE cùng dòng.
     # Warning -> Alarm hoặc Alarm -> Warning không sinh thêm dòng mới.
     if active_log:
+        current_message = active_log["message"] or ""
+        next_message = message or ""
+        current_occurred_at = active_log["occurred_at"] or ""
+
+        unchanged = (
+            active_log["status"] == status
+            and float(active_log["mold_temp"]) == float(mold_temp)
+            and float(active_log["env_temp"]) == float(env_temp)
+            and float(active_log["humidity"]) == float(humidity)
+            and current_message == next_message
+            and current_occurred_at == occurred_at_text
+        )
+
+        if unchanged:
+            return active_log["id"]
+
         setting_conn.execute(
             """
             UPDATE warning_alarm_logs
@@ -213,7 +340,8 @@ def create_warning_log_if_needed(
                 env_temp = ?,
                 humidity = ?,
                 status = ?,
-                message = ?
+                message = ?,
+                occurred_at = ?
             WHERE id = ?;
             """,
             (
@@ -222,6 +350,7 @@ def create_warning_log_if_needed(
                 humidity,
                 status,
                 message,
+                occurred_at_text,
                 active_log["id"],
             ),
         )
@@ -230,40 +359,117 @@ def create_warning_log_if_needed(
             setting_conn.commit()
         return active_log["id"]
 
-    cursor = setting_conn.execute(
-        """
-        INSERT INTO warning_alarm_logs (
-            machine_id,
-            mold_temp,
-            env_temp,
-            humidity,
-            status,
-            message,
-            occurred_at,
-            resolved_at,
-            is_confirmed
+    try:
+        cursor = setting_conn.execute(
+            """
+            INSERT INTO warning_alarm_logs (
+                machine_id,
+                mold_temp,
+                env_temp,
+                humidity,
+                status,
+                message,
+                occurred_at,
+                resolved_at,
+                is_confirmed
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0);
+            """,
+            (
+                machine["id"],
+                mold_temp,
+                env_temp,
+                humidity,
+                status,
+                message,
+                occurred_at_text,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0);
-        """,
-        (
-            machine["id"],
-            mold_temp,
-            env_temp,
-            humidity,
-            status,
-            message,
-            occurred_at_text,
-        ),
-    )
 
-    if commit:
-        setting_conn.commit()
-    return cursor.lastrowid
+        if commit:
+            setting_conn.commit()
+        return cursor.lastrowid
+
+    except sqlite3.IntegrityError:
+        # Trường hợp 2 request cùng lúc cùng muốn tạo active log cho một máy:
+        # unique index giữ DB sạch, request sau sẽ update lại dòng active hiện có.
+        active_log = setting_conn.execute(
+            """
+            SELECT id
+            FROM warning_alarm_logs
+            WHERE machine_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND resolved_at IS NULL
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT 1;
+            """,
+            (machine["id"],),
+        ).fetchone()
+
+        if not active_log:
+            raise
+
+        setting_conn.execute(
+            """
+            UPDATE warning_alarm_logs
+            SET
+                mold_temp = ?,
+                env_temp = ?,
+                humidity = ?,
+                status = ?,
+                message = ?,
+                occurred_at = ?
+            WHERE id = ?;
+            """,
+            (
+                mold_temp,
+                env_temp,
+                humidity,
+                status,
+                message,
+                occurred_at_text,
+                active_log["id"],
+            ),
+        )
+
+        if commit:
+            setting_conn.commit()
+        return active_log["id"]
 
 
 def calculate_status_for_reading(setting_conn, machine_id, mold_temp, env_temp, humidity):
     threshold = get_threshold_for_machine(setting_conn, machine_id)
     return calc_status(mold_temp, env_temp, humidity, threshold)
+
+
+def get_active_log_map(setting_conn):
+    try:
+        rows = setting_conn.execute(
+            """
+            SELECT
+                machine_id,
+                id,
+                status,
+                COALESCE(is_confirmed, 0) AS is_confirmed
+            FROM warning_alarm_logs
+            WHERE COALESCE(is_deleted, 0) = 0
+              AND resolved_at IS NULL
+            ORDER BY machine_id ASC, occurred_at DESC, id DESC;
+            """,
+        ).fetchall()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error).lower():
+            raise
+        return {}
+
+    result = {}
+
+    for row in rows:
+        machine_id = row["machine_id"]
+        if machine_id not in result:
+            result[machine_id] = row
+
+    return result
 
 
 CHART_SAMPLE_TIME_POLICIES = [
@@ -383,6 +589,8 @@ def debug_db():
 
 @machine_bp.route("/api/machines/latest", methods=["GET"])
 def get_latest_machines():
+    global _LAST_WARNING_SYNC_READING, _WARNING_SYNC_CACHE_READY
+
     with get_machine_db() as machine_conn:
         machines = machine_conn.execute(
             """
@@ -396,29 +604,46 @@ def get_latest_machines():
             """
         ).fetchall()
 
-        latest_rows = machine_conn.execute(
-            """
-            SELECT
-                r.machine_id,
-                r.mold_temp,
-                r.env_temp,
-                r.humidity,
-                r.recorded_at
-            FROM sensor_readings r
-            INNER JOIN (
+        # Lấy latest từng máy bằng index (machine_id, recorded_at DESC, id DESC).
+        # Cách này nhẹ hơn query GROUP BY toàn bộ bảng sensor_readings khi dữ liệu lịch sử lớn.
+        latest_rows = []
+
+        for machine in machines:
+            latest = machine_conn.execute(
+                """
                 SELECT
+                    id AS reading_id,
                     machine_id,
-                    MAX(recorded_at || printf('%010d', id)) AS latest_key
+                    mold_temp,
+                    env_temp,
+                    humidity,
+                    recorded_at
                 FROM sensor_readings
-                GROUP BY machine_id
-            ) latest
-                ON latest.machine_id = r.machine_id
-               AND latest.latest_key = r.recorded_at || printf('%010d', r.id)
-            ORDER BY r.machine_id ASC;
-            """
-        ).fetchall()
+                WHERE machine_id = ?
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT 1;
+                """,
+                (machine["id"],),
+            ).fetchone()
+
+            if latest:
+                latest_rows.append(latest)
 
     latest_map = {row["machine_id"]: row for row in latest_rows}
+
+    # Sau khi restart, cache trong RAM bị rỗng. Nếu sync log ngay request đầu,
+    # dashboard sẽ chậm vì phải update/xoá log cho nhiều máy cùng lúc.
+    # Request đầu chỉ warm cache theo latest reading hiện có; từ reading mới tiếp theo mới sync log.
+    skip_initial_warning_sync = False
+
+    if not _WARNING_SYNC_CACHE_READY:
+        _LAST_WARNING_SYNC_READING = {
+            machine_id: row["reading_id"]
+            for machine_id, row in latest_map.items()
+            if row and row["reading_id"]
+        }
+        _WARNING_SYNC_CACHE_READY = True
+        skip_initial_warning_sync = True
 
     data = []
     now = datetime.now()
@@ -440,8 +665,15 @@ def get_latest_machines():
         return (now - recorded_at).total_seconds() > disconnect_after_seconds
 
     with get_setting_machine_db() as setting_conn:
+        # Dữ liệu PLC đang ghi trực tiếp vào sensor_readings.
+        # Vì vậy latest sẽ đồng bộ warning log, nhưng chỉ khi sensor_reading mới xuất hiện.
+        # Dashboard refresh nhiều lần trên cùng một reading sẽ không ghi DB lặp lại.
+        active_log_map = get_active_log_map(setting_conn)
+        before_changes = setting_conn.total_changes
+
         for machine in machines:
             latest = latest_map.get(machine["id"])
+            machine_id = machine["id"]
             disconnected = is_disconnected(latest)
 
             calculated_status = "disconnected"
@@ -452,20 +684,52 @@ def get_latest_machines():
                 mold_temp = latest["mold_temp"]
                 env_temp = latest["env_temp"]
                 humidity = latest["humidity"]
+                reading_id = latest["reading_id"]
 
                 calculated_status = calculate_status_for_reading(
                     setting_conn,
-                    machine["id"],
+                    machine_id,
                     mold_temp,
                     env_temp,
                     humidity,
                 )
 
+                last_synced_reading_id = _LAST_WARNING_SYNC_READING.get(machine_id)
+
+                if not skip_initial_warning_sync and last_synced_reading_id != reading_id:
+                    synced_log_id = create_warning_log_if_needed(
+                        setting_conn=setting_conn,
+                        machine=machine,
+                        mold_temp=mold_temp,
+                        env_temp=env_temp,
+                        humidity=humidity,
+                        status=calculated_status,
+                        occurred_at=latest["recorded_at"],
+                        commit=False,
+                    )
+                    _LAST_WARNING_SYNC_READING[machine_id] = reading_id
+
+                    if calculated_status == "normal":
+                        active_log_map.pop(machine_id, None)
+                    elif synced_log_id is not None:
+                        old_active_log = active_log_map.get(machine_id)
+                        active_log_map[machine_id] = {
+                            "id": synced_log_id,
+                            "status": calculated_status,
+                            "is_confirmed": old_active_log["is_confirmed"] if old_active_log else 0,
+                        }
+
+                active_log = active_log_map.get(machine_id)
+
+                if active_log and calculated_status in ["warning", "alarm"]:
+                    active_log_id = active_log["id"]
+                    need_confirm = not bool(active_log["is_confirmed"])
+
             display_status = "disconnected" if disconnected else calculated_status
 
             data.append(
                 {
-                    "id": machine["id"],
+                    "id": machine_id,
                     "code": machine["machine_code"],
                     "name": machine["machine_name"],
                     "moldTemp": None if disconnected else latest["mold_temp"],
@@ -480,6 +744,9 @@ def get_latest_machines():
                 }
             )
 
+        if setting_conn.total_changes != before_changes:
+            setting_conn.commit()
+
     return jsonify(data)
 
 
@@ -490,6 +757,9 @@ def get_chart_data():
 
     if points <= 0:
         points = 100
+
+    if points > 500:
+        points = 500
 
     start_time_text = request.args.get("startTime", default="").strip()
     end_time_text = request.args.get("endTime", default="").strip()

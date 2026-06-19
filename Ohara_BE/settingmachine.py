@@ -33,6 +33,13 @@ SQLITE_TIMEOUT_SECONDS = 15
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_TIMEOUT_SECONDS * 1000
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        result = super().__exit__(exc_type, exc_value, traceback)
+        self.close()
+        return result
+
+
 def configure_sqlite_connection(conn):
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
@@ -51,6 +58,7 @@ def get_setting_machine_db():
         db_path,
         timeout=SQLITE_TIMEOUT_SECONDS,
         check_same_thread=False,
+        factory=ClosingConnection,
     )
     return configure_sqlite_connection(conn)
 
@@ -94,14 +102,7 @@ def get_global_threshold(conn):
 
     return DEFAULT_MACHINE_THRESHOLDS.copy()
 def ensure_warning_log_columns():
-    db_path = Path(__file__).resolve().parent / "database" / "settingmachine.db"
-
-    conn = sqlite3.connect(
-        db_path,
-        timeout=SQLITE_TIMEOUT_SECONDS,
-        check_same_thread=False,
-    )
-    configure_sqlite_connection(conn)
+    conn = get_setting_machine_db()
 
     try:
         conn.execute("""
@@ -163,6 +164,30 @@ def ensure_warning_log_columns():
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_warning_logs_filter
             ON warning_alarm_logs (is_deleted, machine_id, status, occurred_at DESC);
+        """)
+
+        # Dọn dữ liệu cũ nếu một máy từng bị sinh nhiều log active.
+        conn.execute("""
+            DELETE FROM warning_alarm_logs
+            WHERE COALESCE(is_deleted, 0) = 0
+              AND resolved_at IS NULL
+              AND id NOT IN (
+                  SELECT keep_id
+                  FROM (
+                      SELECT MAX(id) AS keep_id
+                      FROM warning_alarm_logs
+                      WHERE COALESCE(is_deleted, 0) = 0
+                        AND resolved_at IS NULL
+                      GROUP BY machine_id
+                  ) kept
+              );
+        """)
+
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_warning_logs_one_active_per_machine
+            ON warning_alarm_logs (machine_id)
+            WHERE resolved_at IS NULL
+              AND COALESCE(is_deleted, 0) = 0;
         """)
 
         conn.commit()
@@ -829,3 +854,10 @@ def delete_warning_logs():
     return jsonify({
         "message": "Warning logs deleted"
     })
+
+@settingmachine_bp.record_once
+def setup_settingmachine_runtime(state):
+    with state.app.app_context():
+        ensure_machine_threshold_table()
+        ensure_warning_log_columns()
+        ensure_global_threshold_table()
